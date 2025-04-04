@@ -7,3 +7,8 @@ authors = ["Kit Isaev <14875494+nikis05@users.noreply.github.com>"]
 license = "MIT"
 
 [dependencies]
+dashmap = "6.1.0"
+futures-util = "0.3.31"
+mongodb = "3.2.3"
+once_cell = "1.21.3"
+serde = "1.0.219"
