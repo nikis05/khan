@@ -1,0 +1,9 @@
+[package]
+name = "khan-macros"
+description = "Macros for Khan crate"
+version = "0.0.1"
+edition = "2024"
+authors = ["Kit Isaev <14875494+nikis05@users.noreply.github.com>"]
+license = "MIT"
+
+[dependencies]
