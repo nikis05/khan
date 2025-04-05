@@ -1,17 +1,85 @@
-use futures_util::TryStreamExt;
+//! Khan is a `MongoDB` ORM for Rust.
+//!
+//! ## Example
+//!
+//! ```
+//! // Define an entity
+//! #[derive(Serialize, Deserialize, Entity)]
+//! #[entity(projections(Profile(email, password)))]
+//! struct User {
+//!   email: String,
+//!   username: String,
+//!   password: String,
+//!   created_at: chrono::DateTime<chrono::Utc>,
+//! }
+//!
+//! // Select an entity by id
+//! let person: User = User::find_one(mongo, by_id(user_id)).await?;
+//!
+//! // Select an entity by custom fields
+//! let recent_user: User = User::find_one(mongo, user::filter! {
+//!   created_at: Gt(Utc::now() - Duration::hours(1)),
+//! }).await?;
+//!  
+//! // Select only necessary fields (email, password) of entity
+//! let profile: Profile = Profile::find_one(mongo, by_id(user_id)).await?;
+//!
+//! // Insert an entity into the database
+//! let user = User {
+//!   email: "mail@example.com".into(),
+//!   username: "nikis05".into(),
+//!   password: "somepassword".into(),
+//!   created_at: chrono::Utc::now(),
+//! };
+//!
+//! user.insert(mongo).await?;
+//!
+//! // Update an entity in the database
+//!
+//! User::update_one(mongo, by_id(user_id), user::patch! {
+//!   email: "new.email@example.com"
+//! }).await?;
+//!
+//! // Update an entity in the database (struct is automatically updated)
+//!
+//! user.patch(mongo, user::patch! {
+//!   email: "new.email@example.com".into(),
+//!   password: "someotherpassword".into()
+//! }).await?;
+//!
+//! // Delete entities matching the filter
+//! User::delete_one(mongo, by_id(user_id)).await?;
+//!
+//! // Remove a document from the database that corresponds to an instance
+//! user.remove(mongo).await?;
+//! ```
+//!
+//! See [`guides`] module to learn more!
+
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::must_use_candidate,
+    clippy::return_self_not_must_use,
+    clippy::missing_errors_doc
+)]
+
+use futures_util::{FutureExt, TryStreamExt, future::BoxFuture};
 use mongodb::{
-    Collection, Database,
+    ClientSession, Collection, Database,
     bson::{self, Bson, Document, bson, doc, oid::ObjectId},
     error::Result,
 };
-use once_cell::sync::Lazy;
 use serde::{Serialize, de::DeserializeOwned};
-use std::{collections::BTreeMap, fmt::Display, marker::PhantomData};
+use std::{collections::BTreeMap, fmt::Display, marker::PhantomData, sync::LazyLock};
+
+pub use khan_macros::{Entity, construct_filter, construct_update};
+
+pub mod guides;
 
 pub trait Entity: ProjectionWithId<Self> + Serialize {
-    type Id: Copy + Serialize;
+    type Id: Copy + Serialize + Send + 'static;
 
-    type Fields: Display;
+    type Fields: Display + Send + 'static;
 
     const COLLECTION_NAME: &'static str;
 
@@ -19,140 +87,168 @@ pub trait Entity: ProjectionWithId<Self> + Serialize {
         db.collection(Self::COLLECTION_NAME)
     }
 
-    async fn count(mongo: Mongo<'_>, filter: impl Filter<Self>) -> Result<u64> {
-        let (db, session) = mongo;
-        let collection = Self::collection(db);
+    fn count<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<u64>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = Self::collection(db);
 
-        let count =
-            with_session!(collection.count_documents(filter.to_document()), session).await?;
+            let count =
+                with_session!(collection.count_documents(filter.to_document()), session).await?;
 
-        Ok(count)
+            Ok(count)
+        }
+        .boxed()
     }
 
-    async fn exists(mongo: Mongo<'_>, filter: impl Filter<Self>) -> Result<bool> {
-        let count = Self::count(mongo, filter).await?;
+    fn exists<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<bool>> {
+        async move {
+            let count = Self::count(mongo, filter).await?;
 
-        Ok(count > 0)
+            Ok(count > 0)
+        }
+        .boxed()
     }
 
-    async fn insert(&self, mongo: Mongo<'_>) -> Result<()> {
-        let (db, session) = mongo;
-        let collection = Self::collection(db);
+    fn insert<'a>(&'a self, mongo: Mongo<'a>) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = Self::collection(db);
 
-        with_session!(collection.insert_one(self), session).await?;
+            with_session!(collection.insert_one(self), session).await?;
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 
-    async fn insert_locked(self, trx: Transaction<'_>) -> Result<Lock<Self>> {
-        let (db, session) = trx;
-        Self::insert(&self, (db, Some(session))).await?;
+    fn insert_locked(self, trx: Transaction<'_>) -> BoxFuture<'_, Result<Lock<Self>>> {
+        async move {
+            Self::insert(&self, trx.into()).await?;
 
-        Ok(Lock(self))
+            Ok(Lock(self))
+        }
+        .boxed()
     }
 
-    async fn insert_many(mongo: Mongo<'_>, entities: &[Self]) -> Result<()> {
-        let (db, session) = mongo;
-        let collection = Self::collection(db);
+    fn insert_many<'a>(mongo: Mongo<'a>, entities: &'a [Self]) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = Self::collection(db);
 
-        with_session!(collection.insert_many(entities), session).await?;
+            with_session!(collection.insert_many(entities), session).await?;
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 
-    async fn insert_many_locked(
+    fn insert_many_locked(
         trx: Transaction<'_>,
         entities: Vec<Self>,
-    ) -> Result<Vec<Lock<Self>>> {
-        let (db, session) = trx;
-        Self::insert_many((db, Some(session)), &entities).await?;
+    ) -> BoxFuture<'_, Result<Vec<Lock<Self>>>> {
+        async move {
+            Self::insert_many(trx.into(), &entities).await?;
 
-        Ok(entities.into_iter().map(Lock).collect())
+            Ok(entities.into_iter().map(Lock).collect())
+        }
+        .boxed()
     }
 
-    async fn update(
-        mongo: Mongo<'_>,
-        filter: impl Filter<Self>,
-        update: impl Update<Self>,
-    ) -> Result<()> {
-        let (db, session) = mongo;
-        let collection = Self::collection(db);
+    fn update<'a>(
+        mongo: Mongo<'a>,
+        filter: impl Filter<Self> + 'a,
+        update: impl Update<Self> + 'a,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = Self::collection(db);
 
-        with_session!(
-            collection.update_many(filter.to_document(), doc! { "$set": update.to_document() }),
-            session
-        )
-        .await?;
+            with_session!(
+                collection.update_many(filter.to_document(), doc! { "$set": update.to_document() }),
+                session
+            )
+            .await?;
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 
-    async fn update_one(
-        mongo: Mongo<'_>,
-        filter: impl Filter<Self>,
-        update: impl Update<Self>,
-    ) -> Result<()> {
-        let (db, session) = mongo;
-        let collection = Self::collection(db);
+    fn update_one<'a>(
+        mongo: Mongo<'a>,
+        filter: impl Filter<Self> + 'a,
+        update: impl Update<Self> + 'a,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = Self::collection(db);
 
-        with_session!(
-            collection.update_one(filter.to_document(), doc! { "$set": update.to_document() }),
-            session
-        )
-        .await?;
+            with_session!(
+                collection.update_one(filter.to_document(), doc! { "$set": update.to_document() }),
+                session
+            )
+            .await?;
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 
-    async fn update_by_id_locked(
-        trx: Transaction<'_>,
+    fn update_by_id_locked<'a>(
+        trx: Transaction<'a>,
         id: Self::Id,
-        update: impl Update<Self>,
-    ) -> Result<Lock<Self::Id>> {
-        let (db, session) = trx;
+        update: impl Update<Self> + 'a,
+    ) -> BoxFuture<'a, Result<Lock<Self::Id>>> {
+        async move {
+            Self::update_one(trx.into(), by_id(id), update).await?;
 
-        Self::update_one((db, Some(session)), FilterById::new(id), update).await?;
-
-        Ok(Lock(id))
+            Ok(Lock(id))
+        }
+        .boxed()
     }
 
-    async fn lock_by_id(trx: Transaction<'_>, id: Self::Id) -> Result<Lock<Self::Id>> {
+    fn lock_by_id(trx: Transaction<'_>, id: Self::Id) -> BoxFuture<'_, Result<Lock<Self::Id>>> {
         Self::update_by_id_locked(
             trx,
             id,
-            UntypedUpdate::new(
-                doc! { "$set": { "_lock": { "seed": ObjectId::new() } } },
-                |_| {},
-            ),
+            UntypedUpdate::new(doc! { "$set": { "_lock": { "seed": ObjectId::new() } } }),
         )
-        .await
     }
 
-    async fn delete(mongo: Mongo<'_>, filter: impl Filter<Self>) -> Result<()> {
-        let (db, session) = mongo;
-        let collection = Self::collection(db);
+    fn delete<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = Self::collection(db);
 
-        with_session!(collection.delete_many(filter.to_document()), session).await?;
+            with_session!(collection.delete_many(filter.to_document()), session).await?;
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 
-    async fn delete_one(mongo: Mongo<'_>, filter: impl Filter<Self>) -> Result<()> {
-        let (db, session) = mongo;
-        let collection = Self::collection(db);
+    fn delete_one<'a>(
+        mongo: Mongo<'a>,
+        filter: impl Filter<Self> + 'a,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = Self::collection(db);
 
-        with_session!(collection.delete_one(filter.to_document()), session).await?;
+            with_session!(collection.delete_one(filter.to_document()), session).await?;
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 }
 
-pub trait Projection<E: Entity>: DeserializeOwned + Send + Sync {
+pub trait Projection<E: Entity>: DeserializeOwned + Send + Sync + 'static {
     const FIELDS: Option<&'static [&'static str]>;
 
     fn projection_document() -> Option<Document> {
-        static DOCUMENTS: Lazy<dashmap::DashMap<&'static [&'static str], Document>> =
-            Lazy::new(|| dashmap::DashMap::new());
+        static DOCUMENTS: LazyLock<dashmap::DashMap<&'static [&'static str], Document>> =
+            LazyLock::new(dashmap::DashMap::new);
 
         Self::FIELDS.map(|fields| {
             if let Some(document) = DOCUMENTS.get(fields) {
@@ -179,167 +275,252 @@ pub trait Projection<E: Entity>: DeserializeOwned + Send + Sync {
         })
     }
 
-    async fn find_with_opts(
-        mongo: Mongo<'_>,
-        filter: impl Filter<E>,
+    fn find_with_opts<'a>(
+        mongo: Mongo<'a>,
+        filter: impl Filter<E> + 'a,
         skip: Option<u64>,
         limit: Option<i64>,
         sort: Option<BTreeMap<E::Fields, Order>>,
-    ) -> Result<Vec<Self>> {
-        let (db, session) = mongo;
-        let collection = db.collection(E::COLLECTION_NAME);
+    ) -> BoxFuture<'a, Result<Vec<Self>>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = db.collection(E::COLLECTION_NAME);
 
-        let mut query = collection.find(filter.to_document());
+            let mut query = collection.find(filter.to_document());
 
-        if let Some(projection) = Self::projection_document() {
-            query = query.projection(projection);
-        }
-
-        if let Some(skip) = skip {
-            query = query.skip(skip);
-        };
-
-        if let Some(limit) = limit {
-            query = query.limit(limit);
-        };
-
-        if let Some(sort) = sort {
-            let sort_doc = sort
-                .into_iter()
-                .map(|(k, v)| {
-                    (
-                        k.to_string(),
-                        match v {
-                            Order::Asc => bson!(1),
-                            Order::Desc => bson!(-1),
-                        },
-                    )
-                })
-                .collect();
-            query = query.sort(sort_doc);
-        };
-
-        let entities = match session {
-            Some(session) => {
-                query
-                    .session(&mut *session)
-                    .await?
-                    .stream(&mut *session)
-                    .try_collect()
-                    .await
+            if let Some(projection) = Self::projection_document() {
+                query = query.projection(projection);
             }
-            None => query.await?.try_collect().await,
-        }?;
 
-        Ok(entities)
-    }
+            if let Some(skip) = skip {
+                query = query.skip(skip);
+            }
 
-    async fn find(mongo: Mongo<'_>, filter: impl Filter<E>) -> Result<Vec<Self>> {
-        Self::find_with_opts(mongo, filter, None, None, None).await
-    }
+            if let Some(limit) = limit {
+                query = query.limit(limit);
+            }
 
-    async fn find_one(mongo: Mongo<'_>, filter: impl Filter<E>) -> Result<Option<Self>> {
-        let (db, session) = mongo;
-        let collection = db.collection(E::COLLECTION_NAME);
+            if let Some(sort) = sort {
+                let sort_doc = sort
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            k.to_string(),
+                            match v {
+                                Order::Asc => bson!(1),
+                                Order::Desc => bson!(-1),
+                            },
+                        )
+                    })
+                    .collect();
+                query = query.sort(sort_doc);
+            }
 
-        let mut query = collection.find_one(filter.to_document());
-        if let Some(projection) = Self::projection_document() {
-            query = query.projection(projection);
+            let entities = match session {
+                Some(session) => {
+                    query
+                        .session(&mut *session)
+                        .await?
+                        .stream(&mut *session)
+                        .try_collect()
+                        .await
+                }
+                None => query.await?.try_collect().await,
+            }?;
+
+            Ok(entities)
         }
-
-        let entity = with_session!(query, session).await?;
-
-        Ok(entity)
+        .boxed()
     }
 
-    async fn find_one_and_lock(
-        trx: Transaction<'_>,
-        filter: impl Filter<E>,
-    ) -> Result<Option<Lock<Self>>> {
+    fn find<'a>(mongo: Mongo<'a>, filter: impl Filter<E> + 'a) -> BoxFuture<'a, Result<Vec<Self>>> {
+        Self::find_with_opts(mongo, filter, None, None, None)
+    }
+
+    fn find_one<'a>(
+        mongo: Mongo<'a>,
+        filter: impl Filter<E> + 'a,
+    ) -> BoxFuture<'a, Result<Option<Self>>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = db.collection(E::COLLECTION_NAME);
+
+            let mut query = collection.find_one(filter.to_document());
+            if let Some(projection) = Self::projection_document() {
+                query = query.projection(projection);
+            }
+
+            let entity = with_session!(query, session).await?;
+
+            Ok(entity)
+        }
+        .boxed()
+    }
+
+    fn find_one_and_lock<'a>(
+        trx: Transaction<'a>,
+        filter: impl Filter<E> + 'a,
+    ) -> BoxFuture<'a, Result<Option<Lock<Self>>>> {
         Self::find_one_and_update_locked(
             trx,
             filter,
-            UntypedUpdate::new(
-                doc! { "$set": { "_lock": { "seed": ObjectId::new() } } },
-                |_| {},
-            ),
+            UntypedUpdate::new(doc! { "$set": { "_lock": { "seed": ObjectId::new() } } }),
         )
-        .await
     }
 
-    async fn find_one_and_update(
-        mongo: Mongo<'_>,
-        filter: impl Filter<E>,
-        update: impl Update<E>,
-    ) -> Result<Option<Self>> {
-        let (db, session) = mongo;
-        let collection = db.collection(E::COLLECTION_NAME);
+    fn find_one_and_update<'a>(
+        mongo: Mongo<'a>,
+        filter: impl Filter<E> + 'a,
+        update: impl Update<E> + 'a,
+    ) -> BoxFuture<'a, Result<Option<Self>>> {
+        async move {
+            let Mongo { db, session } = mongo;
+            let collection = db.collection(E::COLLECTION_NAME);
 
-        let mut query = collection.find_one_and_update(filter.to_document(), update.to_document());
-        if let Some(projection) = Self::projection_document() {
-            query = query.projection(projection);
+            let mut query =
+                collection.find_one_and_update(filter.to_document(), update.to_document());
+            if let Some(projection) = Self::projection_document() {
+                query = query.projection(projection);
+            }
+
+            let entity = with_session!(query, session).await?;
+
+            Ok(entity)
         }
-
-        let entity = with_session!(query, session).await?;
-
-        Ok(entity)
+        .boxed()
     }
 
-    async fn find_one_and_update_locked(
-        trx: Transaction<'_>,
-        filter: impl Filter<E>,
-        update: impl Update<E>,
-    ) -> Result<Option<Lock<Self>>> {
-        let (db, session) = trx;
+    fn find_one_and_update_locked<'a>(
+        trx: Transaction<'a>,
+        filter: impl Filter<E> + 'a,
+        update: impl Update<E> + 'a,
+    ) -> BoxFuture<'a, Result<Option<Lock<Self>>>> {
+        async move {
+            let entity = Self::find_one_and_update(trx.into(), filter, update).await?;
 
-        let entity = Self::find_one_and_update((db, Some(session)), filter, update).await?;
-
-        Ok(entity.map(Lock))
+            Ok(entity.map(Lock))
+        }
+        .boxed()
     }
 }
 
 pub trait ProjectionWithId<E: Entity>: Projection<E> {
     fn id(&self) -> E::Id;
 
-    async fn patch(
-        &mut self,
-        mongo: Mongo<'_>,
-        update: impl Update<E> + UpdateApply<Self>,
-    ) -> Result<()> {
-        E::update_one(
-            mongo,
-            FilterById::new(self.id()),
-            UntypedUpdate::new(update.to_document(), |_| {}),
-        )
-        .await?;
+    fn patch<'a>(
+        &'a mut self,
+        mongo: Mongo<'a>,
+        update: impl Update<E> + UpdateApply<Self> + 'a,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            E::update_one(
+                mongo,
+                by_id(self.id()),
+                UntypedUpdateApply::new(update.to_document(), |_: &mut Self| {}),
+            )
+            .await?;
 
-        update.apply(self);
+            update.apply(self)?;
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 
-    async fn patch_locked(
+    fn patch_locked<'a>(
         mut self,
-        trx: Transaction<'_>,
-        update: impl Update<E> + UpdateApply<Self>,
-    ) -> Result<Lock<Self>> {
-        let (db, session) = trx;
+        trx: Transaction<'a>,
+        update: impl Update<E> + UpdateApply<Self> + 'a,
+    ) -> BoxFuture<'a, Result<Lock<Self>>> {
+        async move {
+            self.patch(trx.into(), update).await?;
 
-        self.patch((db, Some(session)), update).await?;
-
-        Ok(Lock(self))
+            Ok(Lock(self))
+        }
+        .boxed()
     }
 
-    async fn remove(&self, mongo: Mongo<'_>) -> Result<()> {
-        E::delete_one(mongo, FilterById::new(self.id())).await?;
+    fn remove<'a>(&'a self, mongo: Mongo<'a>) -> BoxFuture<'a, Result<()>> {
+        async move {
+            E::delete_one(mongo, by_id(self.id())).await?;
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 }
 
-pub type Mongo<'a> = (&'a Database, Option<&'a mut mongodb::ClientSession>);
+#[derive(Debug)]
+pub struct Mongo<'a> {
+    pub db: &'a Database,
+    pub session: Option<&'a mut ClientSession>,
+}
 
-pub type Transaction<'a> = (&'a Database, &'a mut mongodb::ClientSession);
+impl<'a> Mongo<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db, session: None }
+    }
+
+    pub fn new_with_session(db: &'a Database, session: &'a mut ClientSession) -> Self {
+        Self {
+            db,
+            session: Some(session),
+        }
+    }
+
+    pub fn rb(&mut self) -> Mongo<'_> {
+        Mongo {
+            db: self.db,
+            session: self.session.as_deref_mut(),
+        }
+    }
+}
+
+impl<'a> From<&'a Database> for Mongo<'a> {
+    fn from(value: &'a Database) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<'a> From<(&'a Database, &'a mut ClientSession)> for Mongo<'a> {
+    fn from(value: (&'a Database, &'a mut ClientSession)) -> Self {
+        Self::new_with_session(value.0, value.1)
+    }
+}
+
+#[derive(Debug)]
+pub struct Transaction<'a> {
+    pub db: &'a Database,
+    pub session: &'a mut ClientSession,
+}
+
+impl<'a> Transaction<'a> {
+    pub fn new(db: &'a Database, session: &'a mut ClientSession) -> Self {
+        Self { db, session }
+    }
+
+    pub fn rb(&mut self) -> Transaction<'_> {
+        Transaction {
+            db: self.db,
+            session: &mut *self.session,
+        }
+    }
+}
+
+impl<'a> From<(&'a Database, &'a mut ClientSession)> for Transaction<'a> {
+    fn from(value: (&'a Database, &'a mut ClientSession)) -> Self {
+        Self::new(value.0, value.1)
+    }
+}
+
+impl<'a> From<Transaction<'a>> for Mongo<'a> {
+    fn from(value: Transaction<'a>) -> Self {
+        Mongo {
+            db: value.db,
+            session: Some(value.session),
+        }
+    }
+}
 
 #[macro_export]
 macro_rules! with_session {
@@ -351,16 +532,15 @@ macro_rules! with_session {
     };
 }
 
-pub trait Filter<E> {
+pub trait Filter<E>: Send {
     fn to_document(&self) -> Document;
 }
 
-pub struct FilterById<E: Entity>(E::Id, PhantomData<*const E>);
+#[derive(Debug)]
+pub struct FilterById<E: Entity>(E::Id, PhantomData<E>);
 
-impl<E: Entity> FilterById<E> {
-    pub fn new(id: E::Id) -> Self {
-        Self(id, PhantomData)
-    }
+pub fn by_id<E: Entity>(id: E::Id) -> FilterById<E> {
+    FilterById(id, PhantomData)
 }
 
 impl<E: Entity> Filter<E> for FilterById<E> {
@@ -369,32 +549,34 @@ impl<E: Entity> Filter<E> for FilterById<E> {
     }
 }
 
-pub struct UntypedFilter<E>(Document, PhantomData<E>);
+#[derive(Debug)]
+pub struct UntypedFilter<E: Send>(Document, PhantomData<E>);
 
-impl<E> UntypedFilter<E> {
+impl<E: Send> UntypedFilter<E> {
     pub fn new(document: Document) -> Self {
         Self(document, PhantomData)
     }
 }
 
-impl<E> Filter<E> for UntypedFilter<E> {
+impl<E: Send> Filter<E> for UntypedFilter<E> {
     fn to_document(&self) -> Document {
         self.0.clone()
     }
 }
 
-pub enum FilterOperator<'a, T> {
+#[derive(Debug)]
+pub enum FilterOperator<'a, T: Serialize + ?Sized> {
     Eq(&'a T),
     Ne(&'a T),
     Gt(&'a T),
     Gte(&'a T),
     Lt(&'a T),
     Lte(&'a T),
-    In(&'a [T]),
-    Nin(&'a [T]),
+    In(&'a [&'a T]),
+    Nin(&'a [&'a T]),
 }
 
-impl<T: Serialize> FilterOperator<'_, T> {
+impl<T: Serialize + ?Sized> FilterOperator<'_, T> {
     pub fn to_document(&self) -> Document {
         fn to_bson<T: Serialize>(val: &T) -> Bson {
             bson::to_bson(val).unwrap()
@@ -415,43 +597,64 @@ impl<T: Serialize> FilterOperator<'_, T> {
     }
 }
 
-pub trait Update<E> {
+pub trait Update<E>: Send {
     fn to_document(&self) -> Document;
 }
 
-pub trait UpdateApply<P> {
-    fn apply(self, projection: &mut P);
-}
+#[derive(Debug)]
+pub struct UntypedUpdate<E>(Document, PhantomData<E>);
 
-pub struct UntypedUpdate<E: Entity, P: Projection<E>, F: Fn(&mut P)>(
-    Document,
-    F,
-    PhantomData<*const (E, P)>,
-);
-
-impl<E: Entity, P: Projection<E>, F: Fn(&mut P)> UntypedUpdate<E, P, F> {
-    pub fn new(document: Document, apply: F) -> Self {
-        Self(document, apply, PhantomData)
+impl<E> UntypedUpdate<E> {
+    fn new(document: Document) -> Self {
+        Self(document, PhantomData)
     }
 }
 
-impl<E: Entity, P: Projection<E>, F: Fn(&mut P)> Update<P> for UntypedUpdate<E, P, F> {
+impl<E: Send> Update<E> for UntypedUpdate<E> {
     fn to_document(&self) -> Document {
         self.0.clone()
     }
 }
 
-impl<E: Entity, P: Projection<E>, F: Fn(&mut P)> UpdateApply<P> for UntypedUpdate<E, P, F> {
-    fn apply(self, projection: &mut P) {
-        self.1(projection);
+pub trait UpdateApply<P> {
+    fn apply(self, projection: &mut P) -> Result<()>;
+}
+
+#[derive(Debug)]
+pub struct UntypedUpdateApply<E: Entity, P: Projection<E>, F: Fn(&mut P) + Send>(
+    Document,
+    F,
+    PhantomData<(E, P)>,
+);
+
+impl<E: Entity, P: Projection<E>, F: Fn(&mut P) + Send> UntypedUpdateApply<E, P, F> {
+    pub fn new(document: Document, apply: F) -> Self {
+        Self(document, apply, PhantomData)
     }
 }
 
+impl<E: Entity, P: Projection<E>, F: Fn(&mut P) + Send> Update<E> for UntypedUpdateApply<E, P, F> {
+    fn to_document(&self) -> Document {
+        self.0.clone()
+    }
+}
+
+impl<E: Entity, P: Projection<E>, F: Fn(&mut P) + Send> UpdateApply<P>
+    for UntypedUpdateApply<E, P, F>
+{
+    fn apply(self, projection: &mut P) -> Result<()> {
+        self.1(projection);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub enum Order {
     Asc,
     Desc,
 }
 
+#[derive(Debug)]
 pub enum Field<T> {
     Set(T),
     Omit,
@@ -472,6 +675,7 @@ impl<T> Default for Field<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct Lock<T>(T);
 
 impl<T> Lock<T> {
@@ -491,5 +695,53 @@ impl<T> std::ops::Deref for Lock<T> {
 impl<T> std::ops::DerefMut for Lock<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+mod example {
+    use super::{Entity, Mongo, Projection, Result, by_id};
+    use mongodb::bson::oid::ObjectId;
+    use serde::{Deserialize, Serialize};
+
+    // Define an entity
+    #[derive(Serialize, Deserialize, Entity)]
+    #[entity(projections(Profile(email, password)))]
+    struct User {
+        #[serde(rename = "_id")]
+        id: ObjectId,
+        email: String,
+        username: String,
+        password: String,
+        //created_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    async fn test(mut mongo: Mongo<'_>, user_id: mongodb::bson::oid::ObjectId) -> Result<()> {
+        // Select an entity by id
+        let person: Option<User> = User::find_one(mongo.rb(), by_id(user_id)).await?;
+
+        // Select an entity by custom fields
+        let me: Option<User> = User::find_one(
+            mongo.rb(),
+            user::filter! {
+              username: "Kit",
+            },
+        )
+        .await?;
+
+        // Select only necessary fields (email, password) of entity
+        let profile: Option<user::Profile> =
+            user::Profile::find_one(mongo.rb(), by_id(user_id)).await?;
+
+        // Insert an entity into the database
+        let user = User {
+            id: ObjectId::new(),
+            email: "mail@example.com".into(),
+            username: "nikis05".into(),
+            password: "somepassword".into(),
+        };
+
+        user.insert(mongo.rb()).await?;
+
+        Ok(())
     }
 }
