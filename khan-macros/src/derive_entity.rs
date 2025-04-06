@@ -256,13 +256,13 @@ fn build(
             }
 
             #[derive(::std::fmt::Debug, ::std::default::Default)]
-            pub struct FieldFilter<'a> {
+            pub struct TypedFilter<'a> {
                 #(
                     pub #field_idents: #krate::Field<#krate::FilterOperator<'a, #filter_field_types>>
                 ),*
             }
 
-            impl #krate::Filter<#ident> for FieldFilter<'_> {
+            impl #krate::Filter<#ident> for TypedFilter<'_> {
                 fn to_document(&self) -> #mongodb::bson::Document {
                     let mut document = #mongodb::bson::doc! {};
 
@@ -281,13 +281,13 @@ fn build(
             }
 
             #[derive(::std::fmt::Debug, ::std::default::Default)]
-            pub struct FieldUpdate {
+            pub struct TypedUpdate {
                 #(
                     pub #field_idents: #krate::Field<#field_types>
                 ),*
             }
 
-            impl #krate::Update<#ident> for FieldUpdate {
+            impl #krate::Update<#ident> for TypedUpdate {
                 fn to_document(&self) -> #mongodb::bson::Document {
                     let mut document = #mongodb::bson::doc! {};
 
@@ -339,7 +339,7 @@ fn build_update_apply<'a>(
     field_idents: impl Iterator<Item = &'a Ident>,
 ) -> TokenStream {
     quote! {
-        impl #krate::UpdateApply<#apply_to> for FieldUpdate {
+        impl #krate::UpdateApply<#apply_to> for TypedUpdate {
             fn apply(self, projection: &mut #apply_to) -> #mongodb::error::Result<()> {
                 #(
                     if let #krate::Field::Set(val) = self.#field_idents {

@@ -94,7 +94,7 @@ fn build(input: &Input) -> TokenStream {
     });
 
     quote! {
-        #module::FieldFilter {
+        #module::TypedFilter {
             #( #fields, )*
             ..std::default::Default::default()
         }

@@ -54,7 +54,7 @@ fn build(input: &Input) -> TokenStream {
     });
 
     quote! {
-        #module::FieldUpdate {
+        #module::TypedUpdate {
             #( #fields, )*
             ..std::default::Default::default()
         }
