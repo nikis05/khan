@@ -8,6 +8,13 @@ use crate::{
 struct Attributes {
     #[darling(default)]
     projections: HashMap<Ident, PathList>,
+    indexes: HashMap<Ident, IndexAttributes>,
+}
+
+#[derive(FromMeta)]
+struct IndexAttributes {
+    keys: HashMap<Ident, LitInt>,
+    options: Expr,
 }
 
 pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
@@ -21,7 +28,7 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
         let fields_span = fields_named.span();
 
         let mut id_ty = None;
-        let mut fields = vec![];
+        let mut fields = HashMap::new();
 
         for field in fields_named.named {
             let rename = extract_serde_rename(&field);
@@ -42,11 +49,13 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
                 id_ty = Some(field.ty.clone());
             }
 
-            fields.push(FieldConfig {
-                ident: field.ident.unwrap(),
-                ty: field.ty,
-                rename,
-            });
+            fields.insert(
+                field.ident.unwrap(),
+                FieldConfig {
+                    ty: field.ty,
+                    rename,
+                },
+            );
         }
 
         let Some(id_ty) = id_ty else {
@@ -69,10 +78,7 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
                     .get_ident()
                     .cloned()
                     .ok_or_else(|| Error::new_spanned(projected_field, "expected ident"))?;
-                if !fields
-                    .iter()
-                    .any(|field| field.ident == projected_field_ident)
-                {
+                if !fields.contains_key(&projected_field_ident) {
                     return Err(Error::new_spanned(projected_field_ident, "unknown field"));
                 }
 
@@ -91,13 +97,56 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
         })
         .try_collect::<_, Vec<_>, _>()?;
 
-    let output = build(&input.vis, &input.ident, &id_ty, &fields, &projections);
+    let indexes = attributes
+        .indexes
+        .into_iter()
+        .map(|(name, index_attrs)| {
+            let name = if name == "_" { None } else { Some(name) };
+
+            let keys = index_attrs
+                .keys
+                .into_iter()
+                .map(|(key, direction_lit)| {
+                    if !fields.contains_key(&key) {
+                        return Err(Error::new_spanned(key, "unknown field"));
+                    }
+
+                    let direction = match direction_lit.base10_parse::<i8>()? {
+                        1 => IndexDirection::Pos,
+                        -1 => IndexDirection::Neg,
+                        _ => {
+                            return Err(Error::new_spanned(
+                                direction_lit,
+                                "index direction must be `1` or `-1`",
+                            ));
+                        }
+                    };
+
+                    Ok((key, direction))
+                })
+                .try_collect()?;
+
+            Ok::<_, syn::Error>(IndexConfig {
+                name,
+                keys,
+                options: index_attrs.options,
+            })
+        })
+        .try_collect::<_, Vec<_>, _>()?;
+
+    let output = build(
+        &input.vis,
+        &input.ident,
+        &id_ty,
+        &fields,
+        &projections,
+        &indexes,
+    );
 
     Ok(output)
 }
 
 struct FieldConfig {
-    ident: Ident,
     ty: Type,
     rename: Option<String>,
 }
@@ -108,12 +157,24 @@ struct ProjectionConfig {
     fields: Vec<Ident>,
 }
 
+struct IndexConfig {
+    name: Option<Ident>,
+    keys: HashMap<Ident, IndexDirection>,
+    options: Expr,
+}
+
+enum IndexDirection {
+    Pos,
+    Neg,
+}
+
 fn build(
     vis: &Visibility,
     ident: &Ident,
     id_ty: &Type,
-    fields: &[FieldConfig],
+    fields: &HashMap<Ident, FieldConfig>,
     projections: &[ProjectionConfig],
+    indexes: &[IndexConfig],
 ) -> TokenStream {
     let krate = krate();
     let mongodb = mongodb();
@@ -129,13 +190,10 @@ fn build(
         Span::call_site(),
     );
 
-    let field_idents = fields
-        .iter()
-        .map(|field_config| &field_config.ident)
-        .collect_vec();
+    let field_idents = fields.keys().collect_vec();
 
     let field_types = fields
-        .iter()
+        .values()
         .map(|field_config| &field_config.ty)
         .collect_vec();
 
@@ -155,11 +213,11 @@ fn build(
 
     let field_lits_by_ident = fields
         .iter()
-        .map(|field| {
+        .map(|(field_ident, field_config)| {
             (
-                &field.ident,
+                field_ident,
                 LitStr::new(
-                    &field
+                    &field_config
                         .rename
                         .as_deref()
                         .map_or_else(|| Cow::Owned(ident.to_string()), Cow::Borrowed),
@@ -179,19 +237,11 @@ fn build(
 
         let projected_field_idents = &config.fields;
 
-        let projected_field_types = projected_field_idents.iter().map(|ident| {
-            &fields
-                .iter()
-                .find(|field| field.ident == *ident)
-                .unwrap()
-                .ty
-        });
-
         let projected_field_lits = config.fields.iter().map(|field| field_lits_by_ident.get(field).unwrap());
 
-        let projection_with_id_impl = if config.has_id {
+        let selectable_with_id_impl = if config.has_id {
             quote! {
-                impl #krate::ProjectionWithId<#ident> for #projection_ident {
+                impl #krate::SelectableWithId<#ident> for #projection_ident {
                     fn id(&self) -> <#ident as #krate::Entity>::Id {
                         self.id
                     }
@@ -201,21 +251,36 @@ fn build(
             quote! {}
         };
 
+        let projection_fields = projected_field_idents.iter().map(|field_ident| {
+            let field_config = fields.get(ident).unwrap();
+
+            let field_ty = &field_config.ty;
+
+            let rename_attr = if let Some(rename) = &field_config.rename {
+                quote! { #[serde(rename = #rename)] }
+            } else {
+                quote! {}
+            };
+
+            quote! {
+                #rename_attr
+                pub #field_ident: #field_ty
+            }
+        });
+
         let update_apply_impl = build_update_apply(&krate, &mongodb, projection_ident, projected_field_idents.iter());
 
         quote! {
             #[derive(::std::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
             pub struct #projection_ident {
-                #(
-                    pub #projected_field_idents: #projected_field_types
-                ),*
+                #( #projection_fields ),*
             }
 
-            impl #krate::Projection<#ident> for #projection_ident {
+            impl #krate::Selectable<#ident> for #projection_ident {
                 const FIELDS: ::std::option::Option<&'static [&'static str]> = ::std::option::Option::Some(&[ #( #projected_field_lits ),* ]);
             }
 
-            #projection_with_id_impl
+            #selectable_with_id_impl
 
             #update_apply_impl
 
@@ -243,13 +308,17 @@ fn build(
                 type Fields = Fields;
 
                 const COLLECTION_NAME: &'static str = #collection_name;
+
+                fn indexes() -> &'static [#mongodb::IndexModel] {
+                    &[]
+                }
             }
 
-            impl #krate::Projection<Self> for #ident {
+            impl #krate::Selectable<Self> for #ident {
                 const FIELDS: ::std::option::Option<&'static [&'static str]> = ::std::option::Option::None;
             }
 
-            impl #krate::ProjectionWithId<Self> for #ident {
+            impl #krate::SelectableWithId<Self> for #ident {
                 fn id(&self) -> <Self as #krate::Entity>::Id {
                     self.id
                 }

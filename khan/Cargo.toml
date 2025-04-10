@@ -13,3 +13,10 @@ mongodb = "3.2.3"
 serde = "1.0.219"
 khan-macros = { version = "0.0.1", path = "../khan-macros" }
 chrono = "0.4.40"
+inventory = { version = "0.3.20", optional = true }
+schemars = { version = "0.8.22", optional = true }
+
+[features]
+default = ["meta", "schema"]
+meta = ["dep:inventory"]
+schema = ["meta", "dep:schemars"]

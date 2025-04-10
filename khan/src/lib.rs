@@ -65,18 +65,24 @@
 
 use futures_util::{FutureExt, TryStreamExt, future::BoxFuture};
 use mongodb::{
-    ClientSession, Collection, Database,
+    ClientSession, Collection, Database, IndexModel,
     bson::{self, Bson, Document, bson, doc, oid::ObjectId},
     error::Result,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt::Display, marker::PhantomData, sync::LazyLock};
 
-pub use khan_macros::{Entity, construct_filter, construct_update};
+pub use khan_macros::Entity;
+#[doc(hidden)]
+pub use khan_macros::{construct_filter, construct_update};
 
 pub mod guides;
+#[cfg(feature = "meta")]
+pub mod meta;
+#[cfg(feature = "meta")]
+pub mod types;
 
-pub trait Entity: ProjectionWithId<Self> + Serialize {
+pub trait Entity: SelectableWithId<Self> + Serialize {
     type Id: Copy + Serialize + Send + 'static;
 
     type Fields: Display + Send + 'static;
@@ -85,6 +91,10 @@ pub trait Entity: ProjectionWithId<Self> + Serialize {
 
     fn collection(db: &Database) -> Collection<Self> {
         db.collection(Self::COLLECTION_NAME)
+    }
+
+    fn indexes() -> &'static [IndexModel] {
+        &[]
     }
 
     fn count<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<u64>> {
@@ -243,10 +253,10 @@ pub trait Entity: ProjectionWithId<Self> + Serialize {
     }
 }
 
-pub trait Projection<E: Entity>: DeserializeOwned + Send + Sync + 'static {
+pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
     const FIELDS: Option<&'static [&'static str]>;
 
-    fn projection_document() -> Option<Document> {
+    fn projection() -> Option<Document> {
         static DOCUMENTS: LazyLock<dashmap::DashMap<&'static [&'static str], Document>> =
             LazyLock::new(dashmap::DashMap::new);
 
@@ -288,7 +298,7 @@ pub trait Projection<E: Entity>: DeserializeOwned + Send + Sync + 'static {
 
             let mut query = collection.find(filter.to_document());
 
-            if let Some(projection) = Self::projection_document() {
+            if let Some(projection) = Self::projection() {
                 query = query.projection(projection);
             }
 
@@ -346,7 +356,7 @@ pub trait Projection<E: Entity>: DeserializeOwned + Send + Sync + 'static {
             let collection = db.collection(E::COLLECTION_NAME);
 
             let mut query = collection.find_one(filter.to_document());
-            if let Some(projection) = Self::projection_document() {
+            if let Some(projection) = Self::projection() {
                 query = query.projection(projection);
             }
 
@@ -379,7 +389,7 @@ pub trait Projection<E: Entity>: DeserializeOwned + Send + Sync + 'static {
 
             let mut query =
                 collection.find_one_and_update(filter.to_document(), update.to_document());
-            if let Some(projection) = Self::projection_document() {
+            if let Some(projection) = Self::projection() {
                 query = query.projection(projection);
             }
 
@@ -404,7 +414,7 @@ pub trait Projection<E: Entity>: DeserializeOwned + Send + Sync + 'static {
     }
 }
 
-pub trait ProjectionWithId<E: Entity>: Projection<E> {
+pub trait SelectableWithId<E: Entity>: Selectable<E> {
     fn id(&self) -> E::Id;
 
     fn patch<'a>(
@@ -616,34 +626,34 @@ impl<E: Send> Update<E> for UntypedUpdate<E> {
     }
 }
 
-pub trait UpdateApply<P> {
-    fn apply(self, projection: &mut P) -> Result<()>;
+pub trait UpdateApply<S> {
+    fn apply(self, selectable: &mut S) -> Result<()>;
 }
 
 #[derive(Debug)]
-pub struct UntypedUpdateApply<E: Entity, P: Projection<E>, F: Fn(&mut P) + Send>(
+pub struct UntypedUpdateApply<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send>(
     Document,
     F,
-    PhantomData<(E, P)>,
+    PhantomData<(E, S)>,
 );
 
-impl<E: Entity, P: Projection<E>, F: Fn(&mut P) + Send> UntypedUpdateApply<E, P, F> {
+impl<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send> UntypedUpdateApply<E, S, F> {
     pub fn new(document: Document, apply: F) -> Self {
         Self(document, apply, PhantomData)
     }
 }
 
-impl<E: Entity, P: Projection<E>, F: Fn(&mut P) + Send> Update<E> for UntypedUpdateApply<E, P, F> {
+impl<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send> Update<E> for UntypedUpdateApply<E, S, F> {
     fn to_document(&self) -> Document {
         self.0.clone()
     }
 }
 
-impl<E: Entity, P: Projection<E>, F: Fn(&mut P) + Send> UpdateApply<P>
-    for UntypedUpdateApply<E, P, F>
+impl<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send> UpdateApply<S>
+    for UntypedUpdateApply<E, S, F>
 {
-    fn apply(self, projection: &mut P) -> Result<()> {
-        self.1(projection);
+    fn apply(self, selectable: &mut S) -> Result<()> {
+        self.1(selectable);
         Ok(())
     }
 }
@@ -699,49 +709,50 @@ impl<T> std::ops::DerefMut for Lock<T> {
 }
 
 mod example {
-    use super::{Entity, Mongo, Projection, Result, by_id};
-    use mongodb::bson::oid::ObjectId;
-    use serde::{Deserialize, Serialize};
+    // use super::{Entity, Mongo, Result, Selectable, by_id};
+    // use mongodb::bson::oid::ObjectId;
+    // use serde::{Deserialize, Serialize};
 
-    // Define an entity
-    #[derive(Serialize, Deserialize, Entity)]
-    #[entity(projections(Profile(email, password)))]
-    struct User {
-        #[serde(rename = "_id")]
-        id: ObjectId,
-        email: String,
-        username: String,
-        password: String,
-        //created_at: chrono::DateTime<chrono::Utc>,
-    }
+    // // Define an entity
+    // #[derive(Serialize, Deserialize, Entity)]
+    // #[entity(projections(PublicProfile(id, name, avatar_url), AuthData(id, email, password)))]
+    // struct User {
+    //     #[serde(rename = "_id")]
+    //     id: ObjectId,
+    //     name: String,
+    //     avatar_url: String,
+    //     email: String,
+    //     password: String,
+    //     //created_at: chrono::DateTime<chrono::Utc>,
+    // }
 
-    async fn test(mut mongo: Mongo<'_>, user_id: mongodb::bson::oid::ObjectId) -> Result<()> {
-        // Select an entity by id
-        let person: Option<User> = User::find_one(mongo.rb(), by_id(user_id)).await?;
+    // async fn test(mut mongo: Mongo<'_>, user_id: mongodb::bson::oid::ObjectId) -> Result<()> {
+    //     // Select an entity by id
+    //     let person: Option<User> = User::find_one(mongo.rb(), by_id(user_id)).await?;
 
-        // Select an entity by custom fields
-        let me: Option<User> = User::find_one(
-            mongo.rb(),
-            user::filter! {
-              username: "Kit",
-            },
-        )
-        .await?;
+    //     // Select an entity by custom fields
+    //     let me: Option<User> = User::find_one(
+    //         mongo.rb(),
+    //         user::filter! {
+    //           username: "Kit",
+    //         },
+    //     )
+    //     .await?;
 
-        // Select only necessary fields (email, password) of entity
-        let profile: Option<user::Profile> =
-            user::Profile::find_one(mongo.rb(), by_id(user_id)).await?;
+    //     // Select only necessary fields (email, password) of entity
+    //     let profile: Option<user::Profile> =
+    //         user::Profile::find_one(mongo.rb(), by_id(user_id)).await?;
 
-        // Insert an entity into the database
-        let user = User {
-            id: ObjectId::new(),
-            email: "mail@example.com".into(),
-            username: "nikis05".into(),
-            password: "somepassword".into(),
-        };
+    //     // Insert an entity into the database
+    //     let user = User {
+    //         id: ObjectId::new(),
+    //         email: "mail@example.com".into(),
+    //         username: "nikis05".into(),
+    //         password: "somepassword".into(),
+    //     };
 
-        user.insert(mongo.rb()).await?;
+    //     user.insert(mongo.rb()).await?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
