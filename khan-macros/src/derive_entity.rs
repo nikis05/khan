@@ -8,13 +8,25 @@ use crate::{
 struct Attributes {
     #[darling(default)]
     projections: HashMap<Ident, PathList>,
+    #[cfg(feature = "meta")]
+    #[darling(default)]
     indexes: HashMap<Ident, IndexAttributes>,
+    #[cfg(feature = "meta")]
+    #[darling(default)]
+    untyped_indexes: Punctuated<Expr, Token![,]>,
+    #[cfg(feature = "schema")]
+    #[darling(default)]
+    query_validation: Option<Expr>,
+    #[cfg(feature = "schema")]
+    #[darling(default)]
+    skip_schema_validation: bool,
 }
 
+#[cfg(feature = "meta")]
 #[derive(FromMeta)]
 struct IndexAttributes {
     keys: HashMap<Ident, LitInt>,
-    options: Expr,
+    options: Option<Expr>,
 }
 
 pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
@@ -97,6 +109,7 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
         })
         .try_collect::<_, Vec<_>, _>()?;
 
+    #[cfg(feature = "meta")]
     let indexes = attributes
         .indexes
         .into_iter()
@@ -140,7 +153,14 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
         &id_ty,
         &fields,
         &projections,
+        #[cfg(feature = "meta")]
         &indexes,
+        #[cfg(feature = "meta")]
+        attributes.untyped_indexes.iter(),
+        #[cfg(feature = "schema")]
+        attributes.skip_schema_validation,
+        #[cfg(feature = "schema")]
+        attributes.query_validation.as_ref(),
     );
 
     Ok(output)
@@ -157,24 +177,30 @@ struct ProjectionConfig {
     fields: Vec<Ident>,
 }
 
+#[cfg(feature = "meta")]
 struct IndexConfig {
     name: Option<Ident>,
     keys: HashMap<Ident, IndexDirection>,
-    options: Expr,
+    options: Option<Expr>,
 }
 
+#[cfg(feature = "meta")]
 enum IndexDirection {
     Pos,
     Neg,
 }
 
-fn build(
+#[allow(clippy::extra_unused_lifetimes)]
+fn build<'a>(
     vis: &Visibility,
     ident: &Ident,
     id_ty: &Type,
     fields: &HashMap<Ident, FieldConfig>,
     projections: &[ProjectionConfig],
-    indexes: &[IndexConfig],
+    #[cfg(feature = "meta")] indexes: &[IndexConfig],
+    #[cfg(feature = "meta")] untyped_indexes: impl Iterator<Item = &'a Expr>,
+    #[cfg(feature = "schema")] skip_schema_validation: bool,
+    #[cfg(feature = "schema")] query_validation: Option<&Expr>,
 ) -> TokenStream {
     let krate = krate();
     let mongodb = mongodb();
@@ -298,6 +324,106 @@ fn build(
 
     let fields_enum = build_fields_enum(field_idents.iter().copied(), field_lits.iter().copied());
 
+    #[cfg(feature = "meta")]
+    let indexes_impl = {
+        let index_models = indexes
+            .iter()
+            .map(|index_config| {
+                let keys = index_config.keys.iter().map(|(key, direction)| {
+                    let key_lit = LitStr::new(&key.to_string(), Span::call_site());
+                    let direction_value = match direction {
+                        IndexDirection::Pos => quote! { 1 },
+                        IndexDirection::Neg => quote! { -1 },
+                    };
+                    quote! { #key_lit: #direction_value }
+                });
+
+                let options = if index_config.name.is_some() || index_config.options.is_some() {
+                    let initial_options = if let Some(options) = &index_config.options {
+                        quote! { #options }
+                    } else {
+                        quote! { #mongodb::options::IndexOptions::default() }
+                    };
+
+                    let assign_name = if let Some(name) = &index_config.name {
+                        let name_lit = LitStr::new(&name.to_string(), Span::call_site());
+                        quote! { options.name = Some(#name_lit); }
+                    } else {
+                        quote! {}
+                    };
+
+                    quote! {
+                        Some({
+                            let mut options: #mongodb::options::IndexOptions = #initial_options;
+                            #assign_name
+                            options
+                        })
+                    }
+                } else {
+                    quote! { None }
+                };
+
+                quote! {
+                    #mongodb::IndexModel::builder()
+                      .keys(#mongodb::bson::doc! { #( #keys ),* })
+                      .options(#options)
+                      .build()
+                }
+            })
+            .chain(untyped_indexes.map(|expr| quote! { #expr }));
+
+        quote! {
+            fn indexes() -> ::std::vec::Vec<#mongodb::IndexModel> {
+                ::std::vec![ #( #index_models ),* ]
+            }
+        }
+    };
+
+    #[cfg(not(feature = "meta"))]
+    let indexes_impl = quote! {};
+
+    #[cfg(feature = "meta")]
+    let query_validation_impl = {
+        let query_validation = if let Some(query_validation) = query_validation {
+            quote! {
+                ::std::option::Option::Some(#query_validation)
+            }
+        } else {
+            quote! { ::std::option::Option::None }
+        };
+
+        quote! {
+            fn query_validation() -> ::std::option::Option<#mongodb::bson::Document> {
+                #query_validation
+            }
+        }
+    };
+
+    #[cfg(not(feature = "meta"))]
+    let query_validation_impl = quote! {};
+
+    #[cfg(feature = "meta")]
+    let submit_metadata = {
+        #[cfg(feature = "schema")]
+        let metadata_constructor = if skip_schema_validation {
+            quote! { of_entity }
+        } else {
+            quote! { of_entity_with_schema }
+        };
+
+        #[cfg(not(feature = "schema"))]
+        let metadata_constructor = quote! { of_entity };
+
+        quote! {
+            crate::meta::__private__inventory_submit! {
+                crate::meta::__PRIVATE__EntityMetadataWrapper(crate::meta::EntityMetadata::#metadata_constructor::<#ident>())
+            }
+        }
+    };
+
+    #[cfg(not(feature = "meta"))]
+    let submit_metadata = quote! {};
+
     quote! {
         #vis mod #mod_ident {
             use super::*;
@@ -309,10 +435,12 @@ fn build(
 
                 const COLLECTION_NAME: &'static str = #collection_name;
 
-                fn indexes() -> &'static [#mongodb::IndexModel] {
-                    &[]
-                }
+                #indexes_impl
+
+                #query_validation_impl
             }
+
+            #submit_metadata
 
             impl #krate::Selectable<Self> for #ident {
                 const FIELDS: ::std::option::Option<&'static [&'static str]> = ::std::option::Option::None;
@@ -383,7 +511,7 @@ fn build(
             #[allow(unused_macros)]
             macro_rules! filter {
                 ($( $input: tt )*) => {
-                   #krate::construct_filter!(#mod_ident, $( $input )*)
+                   #krate::__private__construct_filter!(#mod_ident, $( $input )*)
                 };
             }
 
@@ -392,7 +520,7 @@ fn build(
             #[allow(unused_macros)]
             macro_rules! update {
                 ($( $input: tt )*) => {
-                   #krate::construct_update!(#mod_ident, $( $input )*)
+                   #krate::__private__construct_update!(#mod_ident, $( $input )*)
                 };
             }
 

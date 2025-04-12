@@ -26,12 +26,14 @@ pub fn fields(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     expand(derive_fields::derive_fields, input)
 }
 
+#[allow(non_snake_case)]
 #[proc_macro]
-pub fn construct_filter(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn __private__construct_filter(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     expand(func_construct_filter::func_construct_filter, input)
 }
 
+#[allow(non_snake_case)]
 #[proc_macro]
-pub fn construct_update(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn __private__construct_update(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     expand(func_construct_update::func_construct_update, input)
 }

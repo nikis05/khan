@@ -9,8 +9,8 @@ pub use std::{
     collections::{HashMap, HashSet},
 };
 pub use syn::{
-    Data, DeriveInput, Error, Expr, Field, Fields, FieldsNamed, Ident, LitInt, LitStr, Result,
-    Token, Type, Visibility,
+    Data, DeriveInput, Error, Expr, Field, Fields, FieldsNamed, Ident, LitBool, LitInt, LitStr,
+    Result, Token, Type, Visibility,
     parse::{Parse, Parser},
     parse_quote, parse2,
     punctuated::Punctuated,

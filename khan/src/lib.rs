@@ -74,7 +74,7 @@ use std::{collections::BTreeMap, fmt::Display, marker::PhantomData, sync::LazyLo
 
 pub use khan_macros::Entity;
 #[doc(hidden)]
-pub use khan_macros::{construct_filter, construct_update};
+pub use khan_macros::{__private__construct_filter, __private__construct_update};
 
 pub mod guides;
 #[cfg(feature = "meta")]
@@ -93,8 +93,14 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         db.collection(Self::COLLECTION_NAME)
     }
 
-    fn indexes() -> &'static [IndexModel] {
-        &[]
+    #[cfg(feature = "meta")]
+    fn indexes() -> Vec<IndexModel> {
+        vec![]
+    }
+
+    #[cfg(feature = "meta")]
+    fn query_validation() -> Option<Document> {
+        None
     }
 
     fn count<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<u64>> {
@@ -131,7 +137,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
-    fn insert_locked(self, trx: Transaction<'_>) -> BoxFuture<'_, Result<Lock<Self>>> {
+    fn locking_insert(self, trx: Transaction<'_>) -> BoxFuture<'_, Result<Lock<Self>>> {
         async move {
             Self::insert(&self, trx.into()).await?;
 
@@ -152,7 +158,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
-    fn insert_many_locked(
+    fn locking_insert_many(
         trx: Transaction<'_>,
         entities: Vec<Self>,
     ) -> BoxFuture<'_, Result<Vec<Lock<Self>>>> {
@@ -168,18 +174,18 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         mongo: Mongo<'a>,
         filter: impl Filter<Self> + 'a,
         update: impl Update<Self> + 'a,
-    ) -> BoxFuture<'a, Result<()>> {
+    ) -> BoxFuture<'a, Result<UpdateResult>> {
         async move {
             let Mongo { db, session } = mongo;
             let collection = Self::collection(db);
 
-            with_session!(
+            let result = with_session!(
                 collection.update_many(filter.to_document(), doc! { "$set": update.to_document() }),
                 session
             )
             .await?;
 
-            Ok(())
+            Ok(UpdateResult(result))
         }
         .boxed()
     }
@@ -188,51 +194,74 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         mongo: Mongo<'a>,
         filter: impl Filter<Self> + 'a,
         update: impl Update<Self> + 'a,
-    ) -> BoxFuture<'a, Result<()>> {
+    ) -> BoxFuture<'a, Result<UpdateResult>> {
         async move {
             let Mongo { db, session } = mongo;
             let collection = Self::collection(db);
 
-            with_session!(
+            let result = with_session!(
                 collection.update_one(filter.to_document(), doc! { "$set": update.to_document() }),
                 session
             )
             .await?;
 
-            Ok(())
+            Ok(UpdateResult(result))
         }
         .boxed()
     }
 
-    fn update_by_id_locked<'a>(
-        trx: Transaction<'a>,
+    fn locking_update_by_id<'a>(
+        mut trx: Transaction<'a>,
         id: Self::Id,
         update: impl Update<Self> + 'a,
-    ) -> BoxFuture<'a, Result<Lock<Self::Id>>> {
+    ) -> BoxFuture<'a, Result<Option<Lock<Self::Id>>>> {
         async move {
-            Self::update_one(trx.into(), by_id(id), update).await?;
+            let result =
+                Self::update_one(trx.rb().into(), by_id(id), merge_lock_into_update(&update)?)
+                    .await?;
 
-            Ok(Lock(id))
+            Ok(if result.matched() {
+                Some(Lock(id))
+            } else {
+                None
+            })
         }
         .boxed()
     }
 
-    fn lock_by_id(trx: Transaction<'_>, id: Self::Id) -> BoxFuture<'_, Result<Lock<Self::Id>>> {
-        Self::update_by_id_locked(
-            trx,
-            id,
-            UntypedUpdate::new(doc! { "$set": { "_lock": { "seed": ObjectId::new() } } }),
-        )
+    fn lock_by_id(
+        trx: Transaction<'_>,
+        id: Self::Id,
+    ) -> BoxFuture<'_, Result<Option<Lock<Self::Id>>>> {
+        async move {
+            let result = Self::update_one(
+                trx.into(),
+                by_id(id),
+                UntypedUpdate::new(doc! { "$set": { "_lock": { "seed": ObjectId::new() } } }),
+            )
+            .await?;
+
+            Ok(if result.matched() {
+                Some(Lock(id))
+            } else {
+                None
+            })
+        }
+        .boxed()
     }
 
-    fn delete<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<()>> {
+    fn delete<'a>(
+        mongo: Mongo<'a>,
+        filter: impl Filter<Self> + 'a,
+    ) -> BoxFuture<'a, Result<DeleteResult>> {
         async move {
             let Mongo { db, session } = mongo;
             let collection = Self::collection(db);
 
-            with_session!(collection.delete_many(filter.to_document()), session).await?;
+            let result =
+                with_session!(collection.delete_many(filter.to_document()), session).await?;
 
-            Ok(())
+            Ok(DeleteResult(result))
         }
         .boxed()
     }
@@ -240,14 +269,15 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     fn delete_one<'a>(
         mongo: Mongo<'a>,
         filter: impl Filter<Self> + 'a,
-    ) -> BoxFuture<'a, Result<()>> {
+    ) -> BoxFuture<'a, Result<DeleteResult>> {
         async move {
             let Mongo { db, session } = mongo;
             let collection = Self::collection(db);
 
-            with_session!(collection.delete_one(filter.to_document()), session).await?;
+            let result =
+                with_session!(collection.delete_one(filter.to_document()), session).await?;
 
-            Ok(())
+            Ok(DeleteResult(result))
         }
         .boxed()
     }
@@ -367,15 +397,21 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         .boxed()
     }
 
-    fn find_one_and_lock<'a>(
+    fn locking_find_one<'a>(
         trx: Transaction<'a>,
         filter: impl Filter<E> + 'a,
     ) -> BoxFuture<'a, Result<Option<Lock<Self>>>> {
-        Self::find_one_and_update_locked(
-            trx,
-            filter,
-            UntypedUpdate::new(doc! { "$set": { "_lock": { "seed": ObjectId::new() } } }),
-        )
+        async move {
+            let entity = Self::find_one_and_update(
+                trx.into(),
+                filter,
+                UntypedUpdate::new(doc! { "$set": { "_lock": { "seed": ObjectId::new() } } }),
+            )
+            .await?;
+
+            Ok(entity.map(Lock))
+        }
+        .boxed()
     }
 
     fn find_one_and_update<'a>(
@@ -389,6 +425,7 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
 
             let mut query =
                 collection.find_one_and_update(filter.to_document(), update.to_document());
+
             if let Some(projection) = Self::projection() {
                 query = query.projection(projection);
             }
@@ -400,13 +437,15 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         .boxed()
     }
 
-    fn find_one_and_update_locked<'a>(
+    fn locking_find_one_and_update<'a>(
         trx: Transaction<'a>,
         filter: impl Filter<E> + 'a,
         update: impl Update<E> + 'a,
     ) -> BoxFuture<'a, Result<Option<Lock<Self>>>> {
         async move {
-            let entity = Self::find_one_and_update(trx.into(), filter, update).await?;
+            let entity =
+                Self::find_one_and_update(trx.into(), filter, merge_lock_into_update(&update)?)
+                    .await?;
 
             Ok(entity.map(Lock))
         }
@@ -421,42 +460,45 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
         &'a mut self,
         mongo: Mongo<'a>,
         update: impl Update<E> + UpdateApply<Self> + 'a,
-    ) -> BoxFuture<'a, Result<()>> {
+    ) -> BoxFuture<'a, Result<UpdateResult>> {
         async move {
-            E::update_one(
+            let result = E::update_one(
                 mongo,
                 by_id(self.id()),
-                UntypedUpdateApply::new(update.to_document(), |_: &mut Self| {}),
+                UntypedUpdate::new(update.to_document()),
             )
             .await?;
 
             update.apply(self)?;
 
-            Ok(())
+            Ok(result)
         }
         .boxed()
     }
 
-    fn patch_locked<'a>(
+    fn locking_patch<'a>(
         mut self,
         trx: Transaction<'a>,
         update: impl Update<E> + UpdateApply<Self> + 'a,
-    ) -> BoxFuture<'a, Result<Lock<Self>>> {
+    ) -> BoxFuture<'a, Result<Option<Lock<Self>>>> {
         async move {
-            self.patch(trx.into(), update).await?;
+            let result =
+                E::locking_update_by_id(trx, self.id(), UntypedUpdate::new(update.to_document()))
+                    .await?;
 
-            Ok(Lock(self))
+            if result.is_none() {
+                return Ok(None);
+            }
+
+            update.apply(&mut self)?;
+
+            Ok(Some(Lock(self)))
         }
         .boxed()
     }
 
-    fn remove<'a>(&'a self, mongo: Mongo<'a>) -> BoxFuture<'a, Result<()>> {
-        async move {
-            E::delete_one(mongo, by_id(self.id())).await?;
-
-            Ok(())
-        }
-        .boxed()
+    fn remove<'a>(&'a self, mongo: Mongo<'a>) -> BoxFuture<'a, Result<DeleteResult>> {
+        E::delete_one(mongo, by_id(self.id()))
     }
 }
 
@@ -709,50 +751,64 @@ impl<T> std::ops::DerefMut for Lock<T> {
 }
 
 mod example {
-    // use super::{Entity, Mongo, Result, Selectable, by_id};
-    // use mongodb::bson::oid::ObjectId;
-    // use serde::{Deserialize, Serialize};
+    use serde::Deserialize;
 
-    // // Define an entity
-    // #[derive(Serialize, Deserialize, Entity)]
-    // #[entity(projections(PublicProfile(id, name, avatar_url), AuthData(id, email, password)))]
-    // struct User {
-    //     #[serde(rename = "_id")]
-    //     id: ObjectId,
-    //     name: String,
-    //     avatar_url: String,
-    //     email: String,
-    //     password: String,
-    //     //created_at: chrono::DateTime<chrono::Utc>,
-    // }
+    use super::*;
 
-    // async fn test(mut mongo: Mongo<'_>, user_id: mongodb::bson::oid::ObjectId) -> Result<()> {
-    //     // Select an entity by id
-    //     let person: Option<User> = User::find_one(mongo.rb(), by_id(user_id)).await?;
+    #[derive(Serialize, Deserialize, Entity, schemars::JsonSchema)]
+    struct Post {
+        #[serde(rename = "_id")]
+        id: types::ObjectId,
+        title: String,
+    }
 
-    //     // Select an entity by custom fields
-    //     let me: Option<User> = User::find_one(
-    //         mongo.rb(),
-    //         user::filter! {
-    //           username: "Kit",
-    //         },
-    //     )
-    //     .await?;
+    crate::meta::__private__inventory_submit! {
+        crate::meta::__PRIVATE__EntityMetadataWrapper(crate::meta::EntityMetadata::of_entity_with_schema::<Post>())
+    }
+}
 
-    //     // Select only necessary fields (email, password) of entity
-    //     let profile: Option<user::Profile> =
-    //         user::Profile::find_one(mongo.rb(), by_id(user_id)).await?;
+pub struct UpdateResult(pub mongodb::results::UpdateResult);
 
-    //     // Insert an entity into the database
-    //     let user = User {
-    //         id: ObjectId::new(),
-    //         email: "mail@example.com".into(),
-    //         username: "nikis05".into(),
-    //         password: "somepassword".into(),
-    //     };
+impl UpdateResult {
+    pub fn matched_count(&self) -> u64 {
+        self.0.matched_count
+    }
 
-    //     user.insert(mongo.rb()).await?;
+    pub fn matched(&self) -> bool {
+        self.matched_count() != 0
+    }
 
-    //     Ok(())
-    // }
+    pub fn modified_count(&self) -> u64 {
+        self.0.modified_count
+    }
+
+    pub fn modified(&self) -> bool {
+        self.modified_count() != 0
+    }
+}
+
+pub struct DeleteResult(pub mongodb::results::DeleteResult);
+
+impl DeleteResult {
+    pub fn deleted_count(&self) -> u64 {
+        self.0.deleted_count
+    }
+
+    pub fn deleted(&self) -> bool {
+        self.deleted_count() != 0
+    }
+}
+
+fn merge_lock_into_update<E>(update: &impl Update<E>) -> Result<UntypedUpdate<E>> {
+    let mut document = update.to_document();
+
+    let set_operator = document
+        .entry("$set".into())
+        .or_insert_with(|| doc! {}.into())
+        .as_document_mut()
+        .ok_or_else(|| mongodb::error::Error::custom("`$set` operator value must be an object"))?;
+
+    set_operator.insert("_lock", doc! { "seed": ObjectId::new() });
+
+    Ok(UntypedUpdate::new(document))
 }

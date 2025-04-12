@@ -18,5 +18,5 @@ schemars = { version = "0.8.22", optional = true }
 
 [features]
 default = ["meta", "schema"]
-meta = ["dep:inventory"]
-schema = ["meta", "dep:schemars"]
+meta = ["dep:inventory", "khan-macros/meta"]
+schema = ["meta", "dep:schemars", "khan-macros/schema"]
