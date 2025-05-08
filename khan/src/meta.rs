@@ -9,7 +9,6 @@ use mongodb::{
 
 #[doc(hidden)]
 pub use inventory::submit as __private__inventory_submit;
-use schemars::JsonSchema;
 
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
@@ -38,7 +37,7 @@ impl EntityMetadata {
     }
 
     #[cfg(feature = "schema")]
-    pub const fn of_entity_with_schema<E: Entity + JsonSchema>() -> Self {
+    pub const fn of_entity_with_schema<E: Entity + schemars::JsonSchema>() -> Self {
         Self {
             collection_name: E::COLLECTION_NAME,
             indexes_ptr: E::indexes,
@@ -59,6 +58,9 @@ impl EntityMetadata {
         (self.query_validation_ptr)()
     }
 
+    /// ### Panics
+    /// This method panics if `JsonSchema`s of any of the entities contain keywords or types unsupported by
+    /// `MongoDB`, such as `$ref` or `integer`.
     #[cfg(feature = "schema")]
     pub fn json_schema(&self) -> Option<schemars::schema::Schema> {
         #[derive(Debug, Clone)]
@@ -66,6 +68,21 @@ impl EntityMetadata {
 
         impl schemars::visit::Visitor for Visitor {
             fn visit_schema_object(&mut self, schema: &mut schemars::schema::SchemaObject) {
+                assert!(
+                    if let Some(typ) = &schema.instance_type {
+                        match typ {
+                            schemars::schema::SingleOrVec::Single(typ) => {
+                                **typ != schemars::schema::InstanceType::Integer
+                            }
+                            schemars::schema::SingleOrVec::Vec(types) => types
+                                .iter()
+                                .all(|typ| *typ != schemars::schema::InstanceType::Integer),
+                        }
+                    } else {
+                        true
+                    },
+                    "`integer` type is not supported by MongoDB schema validation. Use `khan::types::Int` instead of std integer types"
+                );
                 assert!(
                     schema.reference.is_none(),
                     "`$ref` keyword is not supported by MongoDB schema validation. Make sure your entities don't contain recursive types"
@@ -90,34 +107,20 @@ impl EntityMetadata {
                         .is_none(),
                     "`id` keyword is not supported by MongoDB schema validation"
                 );
-                assert!(
-                    if let Some(typ) = &schema.instance_type {
-                        match typ {
-                            schemars::schema::SingleOrVec::Single(typ) => {
-                                **typ != schemars::schema::InstanceType::Integer
-                            }
-                            schemars::schema::SingleOrVec::Vec(types) => types
-                                .iter()
-                                .all(|typ| *typ != schemars::schema::InstanceType::Integer),
-                        }
-                    } else {
-                        true
-                    },
-                    "`integer` type is not supported by MongoDB schema validation. Use `khan::types::Int` instead of std integer types"
-                );
 
                 schemars::visit::visit_schema_object(self, schema);
             }
         }
 
         self.json_schema_ptr.map(|json_schema_ptr| {
-            let mut generator = schemars::r#gen::SchemaGenerator::new(
-                schemars::r#gen::SchemaSettings::default().with(|s| {
+            let mut generator = schemars::r#gen::SchemaSettings::default()
+                .with(|s| {
                     s.inline_subschemas = true;
-                    s.visitors = vec![Box::new(Visitor)];
-                }),
-            );
-            json_schema_ptr(&mut generator)
+                })
+                .into_generator();
+            let mut schema = json_schema_ptr(&mut generator);
+            schemars::visit::Visitor::visit_schema(&mut Visitor, &mut schema);
+            schema
         })
     }
 }
@@ -130,16 +133,25 @@ pub fn entity_metadata() -> impl Iterator<Item = &'static EntityMetadata> {
 
 pub async fn enforce_indexes(mongo: Mongo<'_>) -> Result<()> {
     for metadata in entity_metadata() {
+        let indexes = metadata.indexes();
+
+        if indexes.is_empty() {
+            continue;
+        }
+
         mongo
             .db
             .collection::<Document>(metadata.collection_name())
-            .create_indexes(metadata.indexes().iter().cloned())
+            .create_indexes(indexes.into_iter())
             .await?;
     }
 
     Ok(())
 }
 
+/// ### Panics
+/// This function panics if `JsonSchema`s of any of the entities contain keywords or types unsupported by
+/// `MongoDB`, such as `$ref` or `integer`.
 pub async fn enforce_validation(mongo: Mongo<'_>) -> Result<()> {
     let existing_collections = mongo
         .db
@@ -147,6 +159,8 @@ pub async fn enforce_validation(mongo: Mongo<'_>) -> Result<()> {
         .await?
         .into_iter()
         .collect::<HashSet<_>>();
+
+    dbg!(&existing_collections);
 
     for metadata in entity_metadata() {
         let query_validator = metadata
@@ -173,6 +187,8 @@ pub async fn enforce_validation(mongo: Mongo<'_>) -> Result<()> {
         let validator = query_validator;
 
         if let Some(validator) = validator {
+            dbg!(metadata.collection_name());
+            dbg!(existing_collections.contains(metadata.collection_name()));
             if existing_collections.contains(metadata.collection_name()) {
                 mongo
                     .db

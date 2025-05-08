@@ -7,6 +7,8 @@ use crate::{
 #[darling(attributes(entity))]
 struct Attributes {
     #[darling(default)]
+    collection: Option<String>,
+    #[darling(default)]
     projections: HashMap<Ident, PathList>,
     #[cfg(feature = "meta")]
     #[darling(default)]
@@ -14,7 +16,7 @@ struct Attributes {
     #[cfg(feature = "meta")]
     #[darling(default)]
     untyped_indexes: Punctuated<Expr, Token![,]>,
-    #[cfg(feature = "schema")]
+    #[cfg(feature = "meta")]
     #[darling(default)]
     query_validation: Option<Expr>,
     #[cfg(feature = "schema")]
@@ -25,8 +27,14 @@ struct Attributes {
 #[cfg(feature = "meta")]
 #[derive(FromMeta)]
 struct IndexAttributes {
-    keys: HashMap<Ident, LitInt>,
+    keys: HashMap<Ident, i8>,
     options: Option<Expr>,
+}
+
+#[cfg(feature = "meta")]
+enum IndexDirection {
+    Pos,
+    Neg,
 }
 
 pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
@@ -114,22 +122,22 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
         .indexes
         .into_iter()
         .map(|(name, index_attrs)| {
-            let name = if name == "_" { None } else { Some(name) };
+            let name = if name == "__" { None } else { Some(name) };
 
             let keys = index_attrs
                 .keys
                 .into_iter()
-                .map(|(key, direction_lit)| {
+                .map(|(key, direction_val)| {
                     if !fields.contains_key(&key) {
                         return Err(Error::new_spanned(key, "unknown field"));
                     }
 
-                    let direction = match direction_lit.base10_parse::<i8>()? {
+                    let direction = match direction_val {
                         1 => IndexDirection::Pos,
                         -1 => IndexDirection::Neg,
                         _ => {
                             return Err(Error::new_spanned(
-                                direction_lit,
+                                direction_val,
                                 "index direction must be `1` or `-1`",
                             ));
                         }
@@ -150,6 +158,7 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
     let output = build(
         &input.vis,
         &input.ident,
+        attributes.collection.as_deref(),
         &id_ty,
         &fields,
         &projections,
@@ -157,10 +166,10 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
         &indexes,
         #[cfg(feature = "meta")]
         attributes.untyped_indexes.iter(),
+        #[cfg(feature = "meta")]
+        attributes.query_validation.as_ref(),
         #[cfg(feature = "schema")]
         attributes.skip_schema_validation,
-        #[cfg(feature = "schema")]
-        attributes.query_validation.as_ref(),
     );
 
     Ok(output)
@@ -184,23 +193,18 @@ struct IndexConfig {
     options: Option<Expr>,
 }
 
-#[cfg(feature = "meta")]
-enum IndexDirection {
-    Pos,
-    Neg,
-}
-
 #[allow(clippy::extra_unused_lifetimes)]
 fn build<'a>(
     vis: &Visibility,
     ident: &Ident,
+    collection_name: Option<&str>,
     id_ty: &Type,
     fields: &HashMap<Ident, FieldConfig>,
     projections: &[ProjectionConfig],
     #[cfg(feature = "meta")] indexes: &[IndexConfig],
     #[cfg(feature = "meta")] untyped_indexes: impl Iterator<Item = &'a Expr>,
+    #[cfg(feature = "meta")] query_validation: Option<&Expr>,
     #[cfg(feature = "schema")] skip_schema_validation: bool,
-    #[cfg(feature = "schema")] query_validation: Option<&Expr>,
 ) -> TokenStream {
     let krate = krate();
     let mongodb = mongodb();
@@ -210,9 +214,11 @@ fn build<'a>(
     let mod_ident = Ident::new(&lowercase_entity, Span::call_site());
 
     let collection_name = LitStr::new(
-        lowercase_entity
-            .strip_suffix("_entity")
-            .unwrap_or(&lowercase_entity),
+        collection_name.unwrap_or_else(|| {
+            lowercase_entity
+                .strip_suffix("_entity")
+                .unwrap_or(&lowercase_entity)
+        }),
         Span::call_site(),
     );
 
@@ -246,14 +252,17 @@ fn build<'a>(
                     &field_config
                         .rename
                         .as_deref()
-                        .map_or_else(|| Cow::Owned(ident.to_string()), Cow::Borrowed),
+                        .map_or_else(|| Cow::Owned(field_ident.to_string()), Cow::Borrowed),
                     Span::call_site(),
                 ),
             )
         })
         .collect::<HashMap<_, _>>();
 
-    let field_lits = field_lits_by_ident.values().collect_vec();
+    let field_lits = fields
+        .keys()
+        .map(|ident| field_lits_by_ident.get(ident).unwrap())
+        .collect_vec();
 
     let update_apply_for_entity =
         build_update_apply(&krate, &mongodb, ident, field_idents.iter().copied());
@@ -278,7 +287,7 @@ fn build<'a>(
         };
 
         let projection_fields = projected_field_idents.iter().map(|field_ident| {
-            let field_config = fields.get(ident).unwrap();
+            let field_config = fields.get(field_ident).unwrap();
 
             let field_ty = &field_config.ty;
 
@@ -347,7 +356,7 @@ fn build<'a>(
 
                     let assign_name = if let Some(name) = &index_config.name {
                         let name_lit = LitStr::new(&name.to_string(), Span::call_site());
-                        quote! { options.name = Some(#name_lit); }
+                        quote! { options.name = Some(std::string::String::from(#name_lit)); }
                     } else {
                         quote! {}
                     };
@@ -415,8 +424,8 @@ fn build<'a>(
         let metadata_constructor = quote! { of_entity };
 
         quote! {
-            crate::meta::__private__inventory_submit! {
-                crate::meta::__PRIVATE__EntityMetadataWrapper(crate::meta::EntityMetadata::#metadata_constructor::<#ident>())
+            #krate::meta::__private__inventory_submit! {
+                #krate::meta::__PRIVATE__EntityMetadataWrapper(#krate::meta::EntityMetadata::#metadata_constructor::<#ident>())
             }
         }
     };
@@ -461,7 +470,7 @@ fn build<'a>(
 
             impl #krate::Filter<#ident> for TypedFilter<'_> {
                 fn to_document(&self) -> #mongodb::bson::Document {
-                    let mut document = #mongodb::bson::doc! {};
+                    let mut document = #mongodb::bson::Document::new();
 
                     #(
                         if let #krate::Field::Set(val) = &self.#field_idents {
@@ -486,17 +495,24 @@ fn build<'a>(
 
             impl #krate::Update<#ident> for TypedUpdate {
                 fn to_document(&self) -> #mongodb::bson::Document {
-                    let mut document = #mongodb::bson::doc! {};
+                    let mut inner_document = #mongodb::bson::Document::new();
 
                     #(
                         if let #krate::Field::Set(val) = &self.#field_idents {
                             #mongodb::bson::Document::insert(
-                                &mut document,
+                                &mut inner_document,
                                 #field_lits,
                                 ::std::result::Result::unwrap(#mongodb::bson::to_bson(val)),
                             );
                         }
                     )*
+
+                    let mut document = #mongodb::bson::Document::new();
+                    #mongodb::bson::Document::insert(
+                        &mut document,
+                        "$set",
+                        inner_document,
+                    );
 
                     document
                 }

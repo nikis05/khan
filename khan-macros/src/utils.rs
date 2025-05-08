@@ -41,12 +41,18 @@ pub fn build_fields_enum<'a>(
     field_idents: impl Iterator<Item = &'a Ident>,
     field_lits: impl Iterator<Item = &'a LitStr>,
 ) -> TokenStream {
+    let mongodb = mongodb();
     let field_idents_upper_camel_case = field_idents
         .map(|ident| Ident::new(&ident.to_string().to_upper_camel_case(), Span::call_site()))
         .collect_vec();
 
     quote! {
-        #[derive(::std::fmt::Debug)]
+        #[derive(
+            ::std::fmt::Debug,
+            ::std::cmp::PartialEq,
+            ::std::cmp::Eq,
+            ::std::hash::Hash
+        )]
         pub enum Fields {
             #( #field_idents_upper_camel_case ),*
         }
@@ -58,7 +64,7 @@ pub fn build_fields_enum<'a>(
                     "{}",
                     match self {
                         #(
-                            #field_idents_upper_camel_case => #field_lits
+                            Self::#field_idents_upper_camel_case => #field_lits
                         ),*
                     }
                 )
@@ -70,19 +76,33 @@ pub fn build_fields_enum<'a>(
                 ::std::string::ToString::to_string(&value)
             }
         }
+
+        impl ::std::convert::From<Fields> for #mongodb::bson::Bson {
+            fn from(value: Fields) -> Self {
+                #mongodb::bson::Bson::String(
+                    ::std::string::ToString::to_string(&value)
+                )
+            }
+        }
     }
 }
 
 pub fn krate() -> TokenStream {
-    match crate_name("khan").unwrap() {
-        FoundCrate::Itself => quote! { crate },
-        FoundCrate::Name(name) => quote! { #name },
+    match crate_name("khan").unwrap_or(FoundCrate::Name("khan".into())) {
+        FoundCrate::Itself => quote! { ::khan },
+        FoundCrate::Name(name) => {
+            let crate_ident = Ident::new(&name, Span::call_site());
+            quote! { #crate_ident }
+        }
     }
 }
 
 pub fn mongodb() -> TokenStream {
-    match crate_name("khan").unwrap() {
-        FoundCrate::Itself => quote! { ::mongodb },
-        FoundCrate::Name(name) => quote! { #name::mongodb },
+    match crate_name("khan").unwrap_or(FoundCrate::Name("khan".into())) {
+        FoundCrate::Itself => quote! { ::khan::mongodb },
+        FoundCrate::Name(name) => {
+            let crate_ident = Ident::new(&name, Span::call_site());
+            quote! { #crate_ident::mongodb }
+        }
     }
 }

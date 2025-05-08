@@ -1,3 +1,5 @@
+#[cfg(feature = "test")]
+mod attr_async_test;
 #[warn(clippy::pedantic)]
 #[allow(clippy::too_many_lines)]
 mod derive_entity;
@@ -36,4 +38,15 @@ pub fn __private__construct_filter(input: proc_macro::TokenStream) -> proc_macro
 #[proc_macro]
 pub fn __private__construct_update(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     expand(func_construct_update::func_construct_update, input)
+}
+
+#[cfg(feature = "test")]
+#[proc_macro_attribute]
+pub fn async_test(
+    attrs: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    attr_async_test::attr_async_test(attrs.into(), input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }

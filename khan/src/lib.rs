@@ -70,22 +70,23 @@ use mongodb::{
     error::Result,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use std::{collections::BTreeMap, fmt::Display, marker::PhantomData, sync::LazyLock};
+use std::{collections::HashMap, fmt::Display, hash::Hash, marker::PhantomData, sync::LazyLock};
 
-pub use khan_macros::Entity;
 #[doc(hidden)]
 pub use khan_macros::{__private__construct_filter, __private__construct_update};
+pub use khan_macros::{Entity, Fields};
+pub use mongodb;
 
 pub mod guides;
 #[cfg(feature = "meta")]
 pub mod meta;
-#[cfg(feature = "meta")]
+#[cfg(feature = "schema")]
 pub mod types;
 
 pub trait Entity: SelectableWithId<Self> + Serialize {
     type Id: Copy + Serialize + Send + 'static;
 
-    type Fields: Display + Send + 'static;
+    type Fields: Display + Send + Eq + Hash + 'static;
 
     const COLLECTION_NAME: &'static str;
 
@@ -148,6 +149,10 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
 
     fn insert_many<'a>(mongo: Mongo<'a>, entities: &'a [Self]) -> BoxFuture<'a, Result<()>> {
         async move {
+            if entities.is_empty() {
+                return Ok(());
+            }
+
             let Mongo { db, session } = mongo;
             let collection = Self::collection(db);
 
@@ -180,7 +185,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
             let collection = Self::collection(db);
 
             let result = with_session!(
-                collection.update_many(filter.to_document(), doc! { "$set": update.to_document() }),
+                collection.update_many(filter.to_document(), update.to_document()),
                 session
             )
             .await?;
@@ -200,7 +205,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
             let collection = Self::collection(db);
 
             let result = with_session!(
-                collection.update_one(filter.to_document(), doc! { "$set": update.to_document() }),
+                collection.update_one(filter.to_document(), update.to_document()),
                 session
             )
             .await?;
@@ -298,7 +303,7 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
                 let mut document = doc! {};
 
                 for field in fields {
-                    if *field == "id" {
+                    if *field == "_id" {
                         has_id = true;
                     } else {
                         document.insert(*field, 1);
@@ -306,7 +311,7 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
                 }
 
                 if !has_id {
-                    document.insert("_id", -1);
+                    document.insert("_id", 0);
                 }
 
                 DOCUMENTS.insert(fields, document.clone());
@@ -320,7 +325,7 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         filter: impl Filter<E> + 'a,
         skip: Option<u64>,
         limit: Option<i64>,
-        sort: Option<BTreeMap<E::Fields, Order>>,
+        sort: Option<HashMap<E::Fields, Order>>,
     ) -> BoxFuture<'a, Result<Vec<Self>>> {
         async move {
             let Mongo { db, session } = mongo;
@@ -525,6 +530,27 @@ impl<'a> Mongo<'a> {
             db: self.db,
             session: self.session.as_deref_mut(),
         }
+    }
+
+    pub async fn run_transaction<R, C: Send, F>(&mut self, context: C, callback: F) -> Result<R>
+    where
+        F: for<'b> FnMut(Transaction<'b>, &'b mut C) -> BoxFuture<'b, Result<R>> + Send,
+    {
+        let mut session = self.db.client().start_session().await?;
+        session
+            .start_transaction()
+            .and_run(
+                (self.db, context, callback),
+                |session, (db, context, callback)| {
+                    async move {
+                        let transaction = Transaction::new(db, session);
+                        let output = callback(transaction, context).await?;
+                        Ok(output)
+                    }
+                    .boxed()
+                },
+            )
+            .await
     }
 }
 
@@ -747,23 +773,6 @@ impl<T> std::ops::Deref for Lock<T> {
 impl<T> std::ops::DerefMut for Lock<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
-    }
-}
-
-mod example {
-    use serde::Deserialize;
-
-    use super::*;
-
-    #[derive(Serialize, Deserialize, Entity, schemars::JsonSchema)]
-    struct Post {
-        #[serde(rename = "_id")]
-        id: types::ObjectId,
-        title: String,
-    }
-
-    crate::meta::__private__inventory_submit! {
-        crate::meta::__PRIVATE__EntityMetadataWrapper(crate::meta::EntityMetadata::of_entity_with_schema::<Post>())
     }
 }
 
