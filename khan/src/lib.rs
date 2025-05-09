@@ -1,4 +1,4 @@
-//! Khan is a `MongoDB` ORM for Rust.
+//! Khan is a `MongoDB` ODM for Rust.
 //!
 //! ## Example
 //!
@@ -56,7 +56,7 @@
 //!
 //! See [`guides`] module to learn more!
 
-#![warn(clippy::pedantic)]
+#![warn(clippy::pedantic, missing_docs)]
 #![allow(
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
@@ -77,33 +77,87 @@ pub use khan_macros::{__private__construct_filter, __private__construct_update};
 pub use khan_macros::{Entity, Fields};
 pub use mongodb;
 
+/// High-level usage guides for Khan, covering core concepts like CRUD, filters, projections, transactions,
+/// and design patterns. Start here.
 pub mod guides;
+/// Tools for managing indexes and validation rules on collections.
+///
+/// Enabled with the `meta` feature.
 #[cfg(feature = "meta")]
 pub mod meta;
+/// BSON-compatible types for use with JSON Schema validation.
+///
+/// These types serve as drop-in replacements for BSON types that are not  supported by `MongoDB`'s JSON Schema
+/// implementation.
+///
+/// Enabled with the `schema` feature.
 #[cfg(feature = "schema")]
 pub mod types;
 
+/// Core trait representing a `MongoDB` document.
+///
+/// Types that implement `Entity` can be inserted, updated, deleted, and queried by ID. Each entity maps to a
+/// single `MongoDB` collection.
+///
+/// This trait should not be implemented manually — use `#[derive(Entity)]` instead.
+///
+/// Types that derive `Entity`:
+/// - must also derive [`Serialize`](serde::Serialize) and [`Deserialize`](serde::Deserialize),
+/// - must have a field named `id` with `#[serde(rename = "_id")]`,
+/// - the type of the `id` field must implement [`Copy`](std::marker::Copy), and be serializable /
+///   deserializable to / from [`ObjectId`](mongodb::bson::oid::ObjectId).
 pub trait Entity: SelectableWithId<Self> + Serialize {
+    /// Type of the entity’s primary key (`id` field).
+    ///
+    /// Typically this is `ObjectId`, or a newtype wrapper around it.
+    /// The type must serialize and deserialize compatibly with `MongoDB`'s `_id` field.
     type Id: Copy + Serialize + Send + 'static;
 
+    /// Enum representing the entity’s field names, used for sorting and indexing.
+    ///
+    /// This type is automatically generated when you derive `Entity`, and includes
+    /// all fields in the struct.
+    ///
+    /// You can access it as `helper_module::Fields`, where `helper_module` is the lowercase name of the
+    /// entity (e.g. `user::Fields` for `User`).
     type Fields: Display + Send + Eq + Hash + 'static;
 
+    /// Name of the `MongoDB` collection this entity is stored in.
+    ///
+    /// By default, this is the lowercase name of the struct (e.g. `"user"` for `User`). If the entity name
+    /// ends with an `Entity` suffix, e.g. `UserEntity`, that suffix is stripped.
+    ///
+    /// You can override it using the `#[entity(collection = "...")]` attribute.
     const COLLECTION_NAME: &'static str;
 
+    /// Returns a handle to the underlying `MongoDB` collection for this entity.
     fn collection(db: &Database) -> Collection<Self> {
         db.collection(Self::COLLECTION_NAME)
     }
 
+    /// Returns the list of indexes defined for this entity.
+    ///
+    /// This is used by `khan::meta::enforce_indexes` to apply index definitions to the `MongoDB` collection
+    /// at runtime.
+    ///
+    /// When deriving [`Entity`], the implementation is configured by the `#[entity(indexes(...))]` attribute.
     #[cfg(feature = "meta")]
     fn indexes() -> Vec<IndexModel> {
         vec![]
     }
 
+    /// Returns the query validation rule defined for this entity, if any.
+    ///
+    /// This is used by `khan::meta::enforce_validation` to apply query constraints to the `MongoDB` collection.
+    ///
+    /// When deriving [`Entity`], the implementation is configured by the `#[entity(query_validation = ...)]`
+    /// attribute.
     #[cfg(feature = "meta")]
     fn query_validation() -> Option<Document> {
         None
     }
 
+    /// Counts the number of documents in the collection matching the given filter.
     fn count<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<u64>> {
         async move {
             let Mongo { db, session } = mongo;
@@ -117,6 +171,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Checks whether any documents match the given filter.
     fn exists<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<bool>> {
         async move {
             let count = Self::count(mongo, filter).await?;
@@ -126,6 +181,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Inserts this entity into the corresponding `MongoDB` collection.
     fn insert<'a>(&'a self, mongo: Mongo<'a>) -> BoxFuture<'a, Result<()>> {
         async move {
             let Mongo { db, session } = mongo;
@@ -138,6 +194,13 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Like [`insert`](Entity::insert), but returns a `Lock<Self>` to indicate the document is locked
+    /// for the rest of the current transaction.
+    ///
+    /// Because the document is newly inserted within the same transaction, it is not visible to other
+    /// operations and are safe from concurrent modification.
+    ///
+    /// The returned [`Lock`] acts as a type-level guarantee of that isolation.
     fn locking_insert(self, trx: Transaction<'_>) -> BoxFuture<'_, Result<Lock<Self>>> {
         async move {
             Self::insert(&self, trx.into()).await?;
@@ -147,6 +210,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Inserts multiple entities into the collection in a single batch operation.
     fn insert_many<'a>(mongo: Mongo<'a>, entities: &'a [Self]) -> BoxFuture<'a, Result<()>> {
         async move {
             if entities.is_empty() {
@@ -163,6 +227,13 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Like [`insert_many`](Entity::insert_many), but returns a `Vec<Lock<Self>>` to indicate that all
+    /// inserted documents are locked for the duration of the current transaction.
+    ///
+    /// Because the documents are newly inserted within the same transaction, they are not visible to other
+    /// operations and are safe from concurrent modification.
+    ///
+    /// The returned [`Lock`]s act as a type-level guarantee of that isolation.
     fn locking_insert_many(
         trx: Transaction<'_>,
         entities: Vec<Self>,
@@ -175,6 +246,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Updates all documents matching the given filter using the provided update.
     fn update<'a>(
         mongo: Mongo<'a>,
         filter: impl Filter<Self> + 'a,
@@ -195,6 +267,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Updates a single document matching the given filter using the provided update.
     fn update_one<'a>(
         mongo: Mongo<'a>,
         filter: impl Filter<Self> + 'a,
@@ -215,6 +288,14 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Updates a document by ID and returns a `Lock<Self::Id>` to mark it as locked for the remainder of the
+    /// transaction.
+    ///
+    /// In addition to applying the provided update, this method also modifies a dummy field (`_lock.seed`) to
+    /// ensure that the document is write-locked — even if the given update wouldn’t otherwise change any data.
+    /// This prevents concurrent transactions from modifying or deleting the document.
+    ///
+    /// If no document with the given ID exists, returns `None`.
     fn locking_update_by_id<'a>(
         mut trx: Transaction<'a>,
         id: Self::Id,
@@ -234,6 +315,13 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Locks a document by ID for the duration of the current transaction, without applying any meaningful
+    /// update.
+    ///
+    /// This method performs a dummy update on the `_lock.seed` field to trigger `MongoDB`'s write conflict
+    /// detection, ensuring that the document cannot be modified or deleted concurrently.
+    ///
+    /// If no document with the given ID exists, returns `None`.
     fn lock_by_id(
         trx: Transaction<'_>,
         id: Self::Id,
@@ -255,6 +343,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Deletes all documents matching the given filter.
     fn delete<'a>(
         mongo: Mongo<'a>,
         filter: impl Filter<Self> + 'a,
@@ -271,6 +360,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
+    /// Deletes the first document that matches the given filter.
     fn delete_one<'a>(
         mongo: Mongo<'a>,
         filter: impl Filter<Self> + 'a,
@@ -288,9 +378,19 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     }
 }
 
+/// Trait for types that represent a partial view (projection) of an entity.
+///
+/// A `Selectable` defines which fields to include when querying documents from `MongoDB`. It is implemented
+/// automatically for projection structs declared via the `#[entity(projections(...))]` attribute, and for the
+/// entity itself (as the full projection).
+///
+/// This trait is automatically derived — manual implementation is not required.
 pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
+    /// List of fields included in this projection, or `None` if it represents the full entity.
     const FIELDS: Option<&'static [&'static str]>;
 
+    /// Returns a `MongoDB` projection document specifying which fields to include, or `None` if the projection
+    /// represents the full entity.
     fn projection() -> Option<Document> {
         static DOCUMENTS: LazyLock<dashmap::DashMap<&'static [&'static str], Document>> =
             LazyLock::new(dashmap::DashMap::new);
@@ -320,6 +420,8 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         })
     }
 
+    /// Finds documents matching the given filter, returning this projection type, with optional pagination
+    /// and sorting.
     fn find_with_opts<'a>(
         mongo: Mongo<'a>,
         filter: impl Filter<E> + 'a,
@@ -378,10 +480,13 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         .boxed()
     }
 
+    /// Finds all documents matching the given filter and returns them as a list of this projection type.
     fn find<'a>(mongo: Mongo<'a>, filter: impl Filter<E> + 'a) -> BoxFuture<'a, Result<Vec<Self>>> {
         Self::find_with_opts(mongo, filter, None, None, None)
     }
 
+    /// Finds the first document matching the given filter and returns it  as this projection type, or `None`
+    /// if no document matches.
     fn find_one<'a>(
         mongo: Mongo<'a>,
         filter: impl Filter<E> + 'a,
@@ -402,6 +507,13 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         .boxed()
     }
 
+    /// Finds a single document matching the given filter and locks it for the duration of the current
+    /// transaction.
+    ///
+    /// This method performs a dummy update on the `_lock.seed` field to ensure the document is write-locked,
+    /// preventing concurrent modification or deletion.
+    ///
+    /// Returns `None` if no documents are found.
     fn locking_find_one<'a>(
         trx: Transaction<'a>,
         filter: impl Filter<E> + 'a,
@@ -419,6 +531,8 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         .boxed()
     }
 
+    /// Finds a single document matching the given filter, applies the update, and returns the updated document
+    /// using this projection type.
     fn find_one_and_update<'a>(
         mongo: Mongo<'a>,
         filter: impl Filter<E> + 'a,
@@ -442,6 +556,13 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         .boxed()
     }
 
+    /// Finds a single document matching the filter, applies the update, and returns the updated document
+    /// wrapped in a [`Lock<Self>`].
+    ///
+    /// In addition to the given update, this method performs a dummy write to `_lock.seed` to ensure the
+    /// document is locked for the duration of the current transaction.
+    ///
+    /// Returns `None` if no document matches the filter.
     fn locking_find_one_and_update<'a>(
         trx: Transaction<'a>,
         filter: impl Filter<E> + 'a,
@@ -458,9 +579,19 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
     }
 }
 
+/// Extension of [`Selectable`] for projections that include the `id` field.
+///
+/// Projections implementing this trait can be updated and deleted using convenience methods like
+/// [`patch`](SelectableWithId::patch) and [`remove`](SelectableWithId::remove).
+///
+/// This trait is automatically implemented for projections declared with `id`  as one of their fields, as well
+/// as for the entity itself.
 pub trait SelectableWithId<E: Entity>: Selectable<E> {
+    /// Returns the value of the document’s `id` field.
     fn id(&self) -> E::Id;
 
+    /// Updates the corresponding document in the database and applies the same changes to this in-memory
+    /// struct.
     fn patch<'a>(
         &'a mut self,
         mongo: Mongo<'a>,
@@ -481,6 +612,14 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
         .boxed()
     }
 
+    /// Updates the document in the database and the local struct, returning it wrapped in a [`Lock`] to mark
+    /// it as locked for the remainder of the transaction.
+    ///
+    /// In addition to applying the provided update, this method also performs a dummy write to the
+    /// `_lock.seed` field. This ensures the document is write-locked, even if the update wouldn't otherwise
+    /// modify any fields — preventing concurrent transactions from modifying or deleting it.
+    ///
+    /// Returns `Some(Lock<Self>)` if the document was updated, or `None` if no matching document was found.
     fn locking_patch<'a>(
         mut self,
         trx: Transaction<'a>,
@@ -502,22 +641,28 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
         .boxed()
     }
 
+    /// Deletes the corresponding document from the database by its `id`.
     fn remove<'a>(&'a self, mongo: Mongo<'a>) -> BoxFuture<'a, Result<DeleteResult>> {
         E::delete_one(mongo, by_id(self.id()))
     }
 }
 
+/// A lightweight wrapper around a `MongoDB` database reference, optionally paired with a transaction.
 #[derive(Debug)]
 pub struct Mongo<'a> {
+    /// Reference to the `MongoDB` database instance.
     pub db: &'a Database,
+    /// Optional mutable reference to the current transaction session.
     pub session: Option<&'a mut ClientSession>,
 }
 
 impl<'a> Mongo<'a> {
+    /// Creates a new `Mongo` instance without a transaction.
     pub fn new(db: &'a Database) -> Self {
         Self { db, session: None }
     }
 
+    /// Creates a new `Mongo` instance with a transactional session.
     pub fn new_with_session(db: &'a Database, session: &'a mut ClientSession) -> Self {
         Self {
             db,
@@ -525,6 +670,10 @@ impl<'a> Mongo<'a> {
         }
     }
 
+    /// Returns a reborrowed `Mongo` instance for repeated use.
+    ///
+    /// Since `Mongo` is passed by value in most APIs, use this method to call multiple operations without
+    /// consuming the original instance.
     pub fn rb(&mut self) -> Mongo<'_> {
         Mongo {
             db: self.db,
@@ -532,6 +681,26 @@ impl<'a> Mongo<'a> {
         }
     }
 
+    /// Runs a sequence of operations inside a `MongoDB` transaction.
+    ///
+    /// This method handles starting, committing, and aborting the transaction automatically. It accepts a
+    /// context value that is passed to the callback, allowing you to carry external data through the
+    /// transactional flow.
+    ///
+    /// The callback receives a [`Transaction`] and a mutable reference to the context.
+    ///
+    /// The transaction is committed if the callback returns `Ok`, and aborted on error. May retry the entire
+    /// transaction if the callback returns a transient error, similar to
+    /// [`mongodb::action::StartTransaction::and_run`].
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// mongo.run_transaction(("text", 42), |trx, (text, number)| async move {
+    ///     // use `trx` for database operations
+    ///     Ok(())
+    /// }).await?;
+    /// ```
     pub async fn run_transaction<R, C: Send, F>(&mut self, context: C, callback: F) -> Result<R>
     where
         F: for<'b> FnMut(Transaction<'b>, &'b mut C) -> BoxFuture<'b, Result<R>> + Send,
@@ -566,17 +735,25 @@ impl<'a> From<(&'a Database, &'a mut ClientSession)> for Mongo<'a> {
     }
 }
 
+/// Wrapper representing an active `MongoDB` transaction.
 #[derive(Debug)]
 pub struct Transaction<'a> {
+    /// Reference to the `MongoDB` database.
     pub db: &'a Database,
+    /// Mutable reference to the active transactional session.
     pub session: &'a mut ClientSession,
 }
 
 impl<'a> Transaction<'a> {
+    /// Creates a new [`Transaction`] from a database reference and a client session.
     pub fn new(db: &'a Database, session: &'a mut ClientSession) -> Self {
         Self { db, session }
     }
 
+    /// Returns a reborrowed `Transaction<'_>` for repeated use.
+    ///
+    /// Since `Transaction` is passed by value in most APIs, use this method to call multiple operations
+    /// without consuming the original instance.
     pub fn rb(&mut self) -> Transaction<'_> {
         Transaction {
             db: self.db,
@@ -600,6 +777,16 @@ impl<'a> From<Transaction<'a>> for Mongo<'a> {
     }
 }
 
+/// Applies a session to a `MongoDB` query if a session is present.
+///
+/// This macro is used to conditionally attach a transactional session to a query or command:
+///
+/// ```rust
+/// with_session!(collection.find_one(doc), session)
+/// ```
+///
+/// If `session` is `Some`, it calls `.session(session)` on the query;
+/// otherwise, it returns the query unchanged.
 #[macro_export]
 macro_rules! with_session {
     ($query: expr, $session: expr) => {
@@ -610,13 +797,27 @@ macro_rules! with_session {
     };
 }
 
+/// Trait representing a `MongoDB` query filter for a given entity type.
+///
+/// This trait is implemented by both typed filters (e.g. `TypedFilter`) and untyped filters
+/// (e.g. `UntypedFilter`). It allows Khan methods to accept filters in a uniform way,
+/// while preserving type safety where possible.
+///
+/// You typically don't implement this trait manually. Use:
+/// - `entity::filter! { ... }` for typed filters, or
+/// - `UntypedFilter::new(...)` for raw BSON-based filters.
 pub trait Filter<E>: Send {
+    /// Converts the filter into a MongoDB-compatible BSON document.
     fn to_document(&self) -> Document;
 }
 
+/// A simple filter that matches a document by its `id` field.
+///
+/// It implements [`Filter<E>`] and generates a filter of the form `{ "_id": <id> }`.
 #[derive(Debug)]
 pub struct FilterById<E: Entity>(E::Id, PhantomData<E>);
 
+/// Creates a filter that matches a document by its `id`.
 pub fn by_id<E: Entity>(id: E::Id) -> FilterById<E> {
     FilterById(id, PhantomData)
 }
@@ -627,10 +828,15 @@ impl<E: Entity> Filter<E> for FilterById<E> {
     }
 }
 
+/// A raw BSON filter for an entity, bypassing Khan’s typed filter system.
+///
+/// Use this when you need to express advanced `MongoDB` queries that are not supported by Khan’s typed
+/// filters — for example, using `$regex`, `$or`, or computed expressions.
 #[derive(Debug)]
 pub struct UntypedFilter<E: Send>(Document, PhantomData<E>);
 
 impl<E: Send> UntypedFilter<E> {
+    /// Creates a new untyped filter from a raw BSON document.
     pub fn new(document: Document) -> Self {
         Self(document, PhantomData)
     }
@@ -642,6 +848,20 @@ impl<E: Send> Filter<E> for UntypedFilter<E> {
     }
 }
 
+/// Represents a typed `MongoDB` filter operator for a specific field.
+///
+/// This enum is used internally by Khan’s `TypedFilter` structs, and is also supported by the `filter!`
+/// macro generated for each entity.
+///
+/// Variants correspond to common `MongoDB` query operators, such as `$eq`, `$ne`, `$gt`, etc.
+///
+/// Example:
+/// ```rust
+/// Field::Set(FilterOperator::Gt(10))
+/// ```
+///
+/// This constructs a typed filter that translates to `{ "field": { "$gt": 10 } }`.
+#[allow(missing_docs)]
 #[derive(Debug)]
 pub enum FilterOperator<'a, T: Serialize + ?Sized> {
     Eq(&'a T),
@@ -655,6 +875,7 @@ pub enum FilterOperator<'a, T: Serialize + ?Sized> {
 }
 
 impl<T: Serialize + ?Sized> FilterOperator<'_, T> {
+    /// Converts the filter operator into its corresponding `MongoDB` BSON document.
     pub fn to_document(&self) -> Document {
         fn to_bson<T: Serialize>(val: &T) -> Bson {
             bson::to_bson(val).unwrap()
@@ -675,15 +896,29 @@ impl<T: Serialize + ?Sized> FilterOperator<'_, T> {
     }
 }
 
+/// Trait representing an update expression for a given entity type.
+///
+/// This trait is implemented by both typed updates (e.g. `TypedUpdate`) and untyped updates (e.g.
+/// `UntypedUpdate` or `UntypedUpdateApply`).
+///
+/// You typically don’t implement this manually. Use:
+/// - `entity::update! { ... }` for typed updates, or
+/// - `UntypedUpdate::new(...)` for raw BSON updates.
 pub trait Update<E>: Send {
+    /// Converts the update into a BSON document.
     fn to_document(&self) -> Document;
 }
 
+/// A raw BSON update for an entity, bypassing Khan’s typed update system.
+///
+/// Use this when you need to express complex update operations that are not supported
+/// by typed updates — such as `$inc`, `$push`, `$pop`, or updates on nested fields.
 #[derive(Debug)]
 pub struct UntypedUpdate<E>(Document, PhantomData<E>);
 
 impl<E> UntypedUpdate<E> {
-    fn new(document: Document) -> Self {
+    /// Creates an instance of `UntypedUpdate` from a raw BSON document.
+    pub fn new(document: Document) -> Self {
         Self(document, PhantomData)
     }
 }
@@ -694,10 +929,25 @@ impl<E: Send> Update<E> for UntypedUpdate<E> {
     }
 }
 
+/// Trait for applying an update to an in-memory projection.
+///
+/// This is used by methods like [`patch`](SelectableWithId::patch) to ensure that the changes applied to the
+/// database are also reflected in the local struct.
+///
+/// It is typically implemented automatically for typed updates, or provided via a closure when using
+/// [`UntypedUpdateApply`].
 pub trait UpdateApply<S> {
+    /// Applies the update to the given in-memory projection instance.
     fn apply(self, selectable: &mut S) -> Result<()>;
 }
 
+/// A raw BSON update paired with an in-memory update function.
+///
+/// This is used in situations where you need to perform a custom `MongoDB` update
+/// (e.g. `$pop`, `$push`, `$inc`) and also reflect the same change on the local struct.
+///
+/// Typically used with the [`patch`](SelectableWithId::patch) and
+/// [`locking_patch`](SelectableWithId::locking_patch) methods when typed updates are not sufficient.
 #[derive(Debug)]
 pub struct UntypedUpdateApply<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send>(
     Document,
@@ -706,6 +956,10 @@ pub struct UntypedUpdateApply<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send>
 );
 
 impl<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send> UntypedUpdateApply<E, S, F> {
+    /// Creates a new untyped update with an accompanying in-memory apply function.
+    ///
+    /// - `document`: a raw BSON update (e.g. using `$push`, `$pop`, etc.)
+    /// - `apply`: a closure that applies the same change to the in-memory struct
     pub fn new(document: Document, apply: F) -> Self {
         Self(document, apply, PhantomData)
     }
@@ -726,19 +980,34 @@ impl<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send> UpdateApply<S>
     }
 }
 
+/// Sort direction for `MongoDB` queries and index definitions.
 #[derive(Debug)]
 pub enum Order {
+    /// MongoDB’s ascending sort (`1`)
     Asc,
+    /// MongoDB’s descending sort (`-1`)
     Desc,
 }
 
+/// A wrapper used in Khan’s typed filters and updates to mark field usage.
+///
+/// This is used in auto-generated `TypedFilter` and `TypedUpdate` structs,
+/// as well as in the `filter!` and `update!` macros.
+///
+/// - `Set(value)` includes the field in the filter or update.
+/// - `Omit` means the field will be excluded from the generated document.
 #[derive(Debug)]
+#[allow(missing_docs)]
 pub enum Field<T> {
     Set(T),
     Omit,
 }
 
 impl<T> Field<T> {
+    /// Converts an `Option<T>` into a `Field<T>`.
+    ///
+    /// - `Some(value)` becomes `Field::Set(value)`
+    /// - `None` becomes `Field::Omit`
     pub fn from_opt(opt: Option<T>) -> Self {
         match opt {
             Some(val) => Self::Set(val),
@@ -753,12 +1022,34 @@ impl<T> Default for Field<T> {
     }
 }
 
+/// A type-level marker indicating that a document is locked for the current transaction.
+///
+/// This wrapper is returned by locking methods (e.g. `find_one_and_lock`, `locking_insert`) to guarantee that
+/// the wrapped value cannot be modified or deleted concurrently.
+///
+/// It can be passed to any method that requires a locked input.
+///
+/// `Lock<T>` implements `Deref` so it behaves like the inner value in most cases.
 #[derive(Debug)]
 pub struct Lock<T>(T);
 
 impl<T> Lock<T> {
+    /// Creates a new `Lock<T>`. This should only be used if you're certain the value is already locked
+    /// (i.e. modified within the current transaction).
+    pub fn new_unchecked(locked: T) -> Self {
+        Self(locked)
+    }
+
+    /// Consumes the `Lock` and returns the underlying value.
     pub fn into_inner(self) -> T {
         self.0
+    }
+}
+
+impl<E: Entity> Lock<E> {
+    /// Returns a `Lock` containing just the entity’s ID, preserving the locking guarantee at the ID level.
+    pub fn locked_id(&self) -> Lock<E::Id> {
+        Lock(self.0.id())
     }
 }
 
@@ -776,33 +1067,43 @@ impl<T> std::ops::DerefMut for Lock<T> {
     }
 }
 
+/// A wrapper around `mongodb::results::UpdateResult` that represents the result of an update operation on a
+/// `MongoDB` collection.
 pub struct UpdateResult(pub mongodb::results::UpdateResult);
 
 impl UpdateResult {
+    /// Returns the number of documents that matched the update filter.
     pub fn matched_count(&self) -> u64 {
         self.0.matched_count
     }
 
+    /// Returns `true` if at least one document matched the update filter.
     pub fn matched(&self) -> bool {
         self.matched_count() != 0
     }
 
+    /// Returns the number of documents that were actually modified.
     pub fn modified_count(&self) -> u64 {
         self.0.modified_count
     }
 
+    /// Returns `true` if at least one document was modified.
     pub fn modified(&self) -> bool {
         self.modified_count() != 0
     }
 }
 
+/// A wrapper around `mongodb::results::DeleteResult`, representing
+/// the outcome of a delete operation.
 pub struct DeleteResult(pub mongodb::results::DeleteResult);
 
 impl DeleteResult {
+    /// Returns the number of documents that were deleted.
     pub fn deleted_count(&self) -> u64 {
         self.0.deleted_count
     }
 
+    /// Returns `true` if at least one document was deleted.
     pub fn deleted(&self) -> bool {
         self.deleted_count() != 0
     }

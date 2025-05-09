@@ -4,10 +4,7 @@ pub use heck::{ToSnakeCase, ToUpperCamelCase};
 pub use itertools::Itertools;
 pub use proc_macro2::{Span, TokenStream};
 pub use quote::quote;
-pub use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-};
+pub use std::{borrow::Cow, collections::HashMap};
 pub use syn::{
     Data, DeriveInput, Error, Expr, Field, Fields, FieldsNamed, Ident, ItemFn, LitBool, LitInt,
     LitStr, Result, Token, Type, Visibility,

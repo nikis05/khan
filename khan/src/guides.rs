@@ -31,7 +31,7 @@
 /// }
 /// ```
 ///
-/// Once you derive [`Entity`](crate::Entity) for a type, `khan` will map it to a `MongoDB`
+/// Once you derive [`Entity`](crate::Entity) for a type, Khan will map it to a `MongoDB`
 /// collection. By default, the collection name is the lowercase form of the struct name
 /// (e.g., `User` → `user`). You can override this using the
 /// `#[entity(collection = "custom_name")]` attribute.
@@ -70,7 +70,7 @@
 /// a [`mongodb::ClientSession`](mongodb::ClientSession) for use in
 /// [transactions](super::transactions_and_locking).
 ///
-/// It is accepted by all `khan` operations and can be created from a
+/// It is accepted by all Khan operations and can be created from a
 /// [`Database`](mongodb::Database) instance:
 ///
 /// ```
@@ -87,7 +87,7 @@
 /// Methods in `khan` take `Mongo` by value. To reuse the same instance multiple times,
 /// call [`.rb()`](crate::Mongo::rb) to reborrow it:
 ///
-/// ```rust
+/// ```
 /// let mut mongo = Mongo::new(&db);
 ///
 /// let user = User::find_one(mongo.rb(), user::filter! {
@@ -150,7 +150,7 @@ mod getting_started {}
 ///
 /// For example, for the following struct:
 ///
-/// ```rust
+/// ```
 /// #[derive(Entity)]
 /// struct User {
 ///     id: ObjectId,
@@ -319,9 +319,9 @@ mod getting_started {}
 /// User::update_one(mongo, user::filter! { id: user_id }, update).await?;
 /// ```
 ///
-/// ### `Columns` enum
+/// ### `Fields` enum
 ///
-/// Every entity also gets a `Columns` enum generated inside its helper module. This enum
+/// Every entity also gets a `Fields` enum generated inside its helper module. This enum
 /// contains all the field names of your struct and implements `Display`, and is
 /// recommended to use instead of string literals when constructing raw BSON documents.
 ///
@@ -619,22 +619,483 @@ mod projections {}
 /// necessary lock, leading to race conditions or inconsistent state:
 ///
 /// ```
-/// async fn create_comment()
+/// // Model code
+/// async fn create_post(trx: Transaction<'_>, text: String) -> Result<ObjectId> {
+///     let id = ObjectId::new();
+///
+///     // Insert a new post document into the database.
+///     Post {
+///         id,
+///         text,
+///     }
+///     .insert(trx.into())
+///     .await?;
+///
+///     Ok(id)
+/// }
+///
+/// // Model code
+/// async fn create_comment(trx: Transaction<'_>, post_id: ObjectId, text: String) -> Result<()> {
+///     // Insert a new comment referencing the given post_id.
+///     Comment {
+///         id: ObjectId::new(),
+///         post_id,
+///         text,
+///     }
+///     .insert(trx.into())
+///     .await?;
+///
+///     Ok(())
+/// }
+///
+/// // Controller code
+/// async fn make_post_with_initial_comment(ctx: AppContext, post_text: String, comment_text: String) -> Result<()> {
+///     ctx.mongo().run_transaction((post_text, comment_text), |trx, (post_text, comment_text)| async move {
+///         // The post is created as part of this transaction...
+///         let post_id = create_post(trx.rb().into(), post_text).await?;
+///
+///         // ...and the comment referencing it is inserted within the same transaction.
+///         // This is safe: the post is guaranteed to not be deleted or modified until the transaction commits.
+///         create_comment(trx.rb().into(), post_id, comment_text).await?;
+///
+///         Ok(())
+///     }).await?;
+///
+///     Ok(())
+/// }
+///
+/// // Controller code
+/// async fn make_comment(ctx: AppContext, post_id: ObjectId, text: String) -> Result<()> {
+///     ctx.mongo().run_transaction((post_id, text), |trx, (post_id, text)| async move {
+///         // This is NOT safe: we assume the post exists,
+///         // but there's no guarantee it won't be deleted before the transaction commits.
+///         // This can result in a comment pointing to a non-existent post.
+///         create_comment(trx.into(), post_id, text).await?;
+///
+///         Ok(())
+///     }).await?;
+///
+///     Ok(())
+/// }
 /// ```
 ///
 /// In these cases, it may be desirable encode the locking guarantee in the type system.
 ///
-/// Khan provides a [`Lock<T>`](crate::Lock) wrapper type to express this guarantee
-/// explicitly in your method signatures. When a value is wrapped in
-/// [`Lock<T>`](crate::Lock), it means that the document has already been locked (via a
-/// dummy or real update), and it will not be modified again until the transaction
-/// completes.
+/// Khan provides a [`Lock<T>`](crate::Lock) wrapper type to express this guarantee explicitly in your method
+/// signatures. When a value is wrapped in [`Lock<T>`](crate::Lock), it means that the document has already been
+/// locked (via a dummy or real update), and it will not be modified again until the transaction completes.
 ///
-/// You can then require a [`Lock<T>`](crate::Lock) as input to any method that assumes
-/// the document is protected from concurrent modification.
+/// You can then require a [`Lock<T>`](crate::Lock) as input to any method that assumes the document is
+/// protected from concurrent modification:
+///
+/// ```
+/// // Model code
+/// async fn create_post(
+///     trx: Transaction<'_>,
+///     text: String,
+/// ) -> Result<Lock<ObjectId>> {
+///     // This function guarantees at the type level that the post it creates
+///     // will not be modified or deleted until the transaction is committed.
+///
+///     let id = ObjectId::new();
+///
+///     // Insert the post while marking it as "locked" within the transaction.
+///     let post: Lock<Post> = Post {
+///         id,
+///         text,
+///     }
+///     .lock_insert(trx.into())
+///     .await?;
+///
+///     // Convert the locked post into a locked ID, so we can safely pass it to other methods.
+///     let locked_id: Lock<ObjectId> = post.locked_id();
+///
+///     Ok(locked_id)
+/// }
+///
+/// // Model code
+/// async fn create_comment(
+///     trx: Transaction<'_>,
+///     post_id: Lock<ObjectId>, // Enforces that the referenced post is already locked
+///     text: String,
+/// ) -> Result<()> {
+///     // This function requires, at the type level, that the referenced post is locked.
+///     // This ensures the post can't be modified or deleted during the transaction.
+///
+///     Comment {
+///         id: ObjectId::new(),
+///         post_id,
+///         text,
+///     }
+///     .insert(trx.into())
+///     .await?;
+///
+///     Ok(())
+/// }
+///
+/// // Model code
+/// async fn reference_post(trx: Transaction<'_>, post_id: ObjectId) -> Result<Lock<ObjectId>> {
+///     // Attempts to find and lock the post by ID, returning a locked ID if successful.
+///     // If the post does not exist, returns an error.
+///     match Post::lock_by_id(trx, post_id).await? {
+///         Some(locked_id) => Ok(locked_id),
+///         None => Err(Error::custom("Post with this id was not found")),
+///     }
+/// }
+///
+/// // Controller code
+/// async fn make_post_with_initial_comment(
+///     ctx: AppContext,
+///     post_text: String,
+///     comment_text: String,
+/// ) -> Result<()> {
+///     ctx.mongo().run_transaction((post_text, comment_text), |trx, (post_text, comment_text)| async move {
+///         // Creates a new post - it is locked since it has just been inserted.
+///         let post_id: Lock<ObjectId> = create_post(trx.rb().into(), post_text).await?;
+///
+///         // Since the post is locked, we can safely insert a comment referencing it
+///         create_comment(trx.rb().into(), post_id, comment_text).await?;
+///
+///         Ok(())
+///     }).await?;
+///
+///     Ok(())
+/// }
+///
+/// // Controller code
+/// async fn make_comment(ctx: AppContext, post_id: ObjectId, text: String) -> Result<()> {
+///     ctx.mongo().run_transaction((post_id, text), |trx, (post_id, text)| async move {
+///         // Ensure that the post exists and is locked before proceeding
+///         let post_id: Lock<ObjectId> = reference_post(trx.rb().into(), post_id).await?;
+///
+///         // Now that the locking guarantee is enforced by the type system,
+///         // `create_comment` cannot be called unless the post is locked.
+///         create_comment(trx.into(), post_id, text).await?;
+///
+///         Ok(())
+///     }).await?;
+///
+///     Ok(())
+/// }
+/// ```
 mod transactions_and_locking {}
 
+/// # Patterns and Recommendations
+///
+/// Khan is designed to be flexible and unobtrusive — you can structure your application however you like. That
+/// said, there are a few patterns that can help you get the most out of Khan by taking advantage of Rust's
+/// strong type system and module organization.
+///
+/// These recommendations aim to improve clarity, reduce bugs, and make your codebase easier to maintain as it
+/// grows.
+///
+/// ## 1. Use newtypes instead of `ObjectId`
+///
+/// Instead of using `ObjectId` directly in your entities, define a newtype wrapper:
+///
+/// ```
+/// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+/// #[serde(transparent)]
+/// pub struct PostId(pub ObjectId);
+/// ```
+///
+/// This helps avoid mixing up IDs of different entities and improves type safety across your codebase.
+///
+/// You can still use this newtype as an `Entity::Id` type, and Khan will handle it like a regular `ObjectId`.
+///
+/// **NOT RECOMMENDED:**
+///
+/// ```
+/// #[derive(Serialize, Deserialize, Entity)]
+/// struct Post {
+///     id: ObjectId,
+///     text: String,
+/// }
+///
+/// #[derive(Serialize, Deserialize, Entity)]
+/// struct Comment {
+///     id: ObjectId,
+///     post_id: ObjectId,
+///     text: String
+/// }
+/// ```
+///
+/// **RECOMMENDED:**
+///
+/// ```
+/// /// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+/// #[serde(transparent)]
+/// pub struct PostId(pub ObjectId);
+///
+/// /// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+/// #[serde(transparent)]
+/// pub struct CommentId(pub ObjectId);
+///
+/// #[derive(Serialize, Deserialize, Entity)]
+/// struct Post {
+///     id: PostId,
+///     text: String,
+/// }
+///
+/// #[derive(Serialize, Deserialize, Entity)]
+/// struct Comment {
+///     id: CommentId,
+///     post_id: PostId,
+///     text: String
+/// }
+/// ```
+///
+/// ## 2. Isolate database logic in modules
+///
+/// If your app is even moderately complex, keep each entity in its own module, and avoid using Khan types like
+/// `Entity` or `Mongo` directly from controller code.
+///
+/// A layered architecture helps keep database concerns isolated, making your application easier to reason
+/// about, test, and maintain as it grows.
+///
+/// **NOT RECOMMENDED:**
+///
+/// ```
+/// #[derive(Serialize, Deserialize, Entity)]
+/// struct Post {
+///     id: ObjectId,
+///     text: String,
+/// }
+///
+/// // Controller code
+/// async fn create_post(ctx: AppContext, text: String) -> Result<()> {
+///     Post {
+///         id: ObjectId::new(),
+///         text,
+///     }
+///     .insert(ctx.mongo())
+///     .await?;
+///
+///     Ok(())
+/// }
+/// ```
+///
+/// **RECOMMENDED:**
+///
+/// ```
+/// mod model {
+///     mod entity {
+///         use super::*;
+///
+///         #[derive(Serialize, Deserialize, Entity)]
+///         pub struct PostEntity {
+///             id: ObjectId,
+///             text: String,
+///         }
+///     }
+///
+///     pub struct Post(entity::PostEntity);
+///
+///     impl Post {
+///         pub fn id(&self) -> PostId {
+///             self.0.id
+///         }
+///
+///         pub fn text(&self) -> &str {
+///             &self.0.text
+///         }
+///
+///         pub async fn create(mongo: Mongo<'_>, text: String) -> Result<Self> {
+///             let entity = entity::PostEntity {
+///                 id: ObjectId::new(),
+///                 text
+///             };
+///
+///             entity.insert(mongo).await?;
+///
+///             Ok(Self(entity))
+///         }
+///     }
+/// }
+///
+/// async fn create_post(ctx: AppContext, text: String) -> Result<()> {
+///     model::Post::create(ctx.mongo(), text).await?;
+///
+///     Ok(())
+/// }
+/// ```
+///
+/// In a medium-to-large app, the added boilerplate will quickly pay off. To reduce that boilerplate, consider
+/// using crates like [`delegate`](https://crates.io/crates/delegate) or
+/// [`accessory`](https://crates.io/crates/accessory) to generate common forwarding logic.
+///
+/// ## 3. Implement custom methods on entitiesx
+///
+/// Khan focuses on simple CRUD operations. It intentionally avoids covering more complex cases like:
+/// - updates on nested documents or arrays,
+/// - advanced query or projection logic,
+/// - multi-stage conditional operations.
+///
+/// Re-implementing these features generically in Rust would require a complex DSL, which would likely be more
+/// confusing than helpful.
+///
+/// Instead, we recommend defining your own type-safe interfaces for advanced operations on a case-by-case
+/// basis. A good pattern is to implement them as additional methods on your `Entity` structs:
+///
+/// ```
+/// #[derive(Serialize, Deserialize, Entity)]
+/// struct User {
+///     #[serde(rename = "_id")]
+///     id: ObjectId,
+///     name: String,
+///     password: String,
+///     sessions: Vec<Session>,
+/// }
+///
+/// struct Session {
+///     id: ObjectId,
+///     ip_addr: IpAddr,
+/// }
+///
+/// impl User {
+///     /// Adds a new session to the user.
+///     /// This operation uses a raw `$push` update on a nested array field, which is not supported by Khan's
+///     /// typed update API — so we use `UntypedUpdateApply`.
+///     pub async fn add_session(&mut self, mongo: Mongo<'_>, session: Session) -> Result<()> {
+///         self.patch(
+///             mongo,
+///             UntypedUpdateApply::new(
+///                 // Construct a raw MongoDB update document:
+///                 // { "$push": { "sessions": <serialized session> } }
+///                 doc! {
+///                     "$push": { "sessions": bson::to_bson(&session).unwrap() }
+///                 },
+///                 // Apply the same mutation to the in-memory struct
+///                 |user| {
+///                     user.sessions.push(session);
+///                 },
+///             ),
+///         ).await?;
+///
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// This keeps your API clean and expressive, while giving you full control over how each operation behaves.
 mod patterns_and_recommendations {}
+
+/// # Indexes and Schema Validation
+///
+/// `khan` can optionally manage indexes, query validation rules, and JSON Schema validation for your `MongoDB`
+/// collections. These features are disabled by default and can be enabled using crate features.
+///
+/// ## Enabling metadata support
+///
+/// To enable index and validation rule management:
+/// - Use the `meta` feature to enable index and query validation enforcement.
+/// - Use the `schema` feature to enable JSON Schema validation via the `schemars` crate.
+///
+/// ## Defining indexes
+///
+/// Indexes can be declared on your entities using the `#[entity(indexes(...))]` attribute. This is type-safe
+/// — the compiler checks that all referenced fields actually exist.
+///
+/// ```rust
+/// #[derive(Serialize, Deserialize, Entity)]
+/// #[entity(
+///     indexes(
+///         // the name of the index
+///         email_idx(
+///             // index keys and their directions
+///             keys(email = 1),
+///             // optional - additional index options
+///             options = IndexOptions::builder()
+///                 .sparse(true)
+///                 .build()
+///         )
+///     )
+/// )]
+/// struct User {
+///     id: ObjectId,
+///     email: String,
+///     password: String,
+/// }
+/// ```
+///
+/// Notes:
+/// - Use quoted strings for descending indexes: `keys(created_at = "-1")`.
+/// - If the index name is set to `__`, `MongoDB` will generate the name automatically.
+/// - To apply indexes to collections at runtime, call:
+///   ```rust
+///   khan::meta::enforce_indexes(&db).await?;
+///   ```
+///
+/// ## Query validation
+///
+/// `MongoDB` supports per-collection validation rules that restrict allowed query shapes. You can declare
+/// query validation rules using the `#[entity(query_validation = ...)]` attribute.
+///
+/// ```rust
+/// #[derive(Serialize, Deserialize, Entity)]
+/// #[entity(
+///     skip_schema_validation,
+///     query_validation = doc! {
+///         "$gt": [ { "$strLenCP": { "$getField": user::Fields::Name } }, 2 ]
+///     }
+/// )]
+/// struct User {
+///     #[serde(rename = "_id")]
+///     id: ObjectId,
+///     name: String,
+/// }
+/// ```
+///
+/// Validation rules can be applied by calling:
+/// ```rust
+/// khan::meta::enforce_validation(&db).await?;
+/// ```
+///
+/// ## JSON Schema validation
+///
+/// If the `schema` feature is enabled, Khan will generate JSON Schema validation rules for all entities by
+/// default. You can disable it per-entity using:
+/// ```rust
+/// #[entity(skip_schema_validation)]
+/// ```
+///
+/// Entities using schema validation must implement `schemars::JsonSchema`.
+///
+/// ## BSON-compatible schema types
+///
+/// MongoDB’s JSON Schema implementation does not support certain standard keywords, such as the `"integer"`
+/// type. To work around this, Khan provides BSON-compatible wrapper types in the `khan::types` module. Use
+/// these as drop-in replacements in any entity that uses JSON Schema validation:
+///
+/// - `Int32` instead of `i32`
+/// - `Int64` instead of `i64`
+/// - `ObjectId`
+/// - `Regex`
+/// - `JavaScriptCode`
+/// - `JavaScriptCodeWithScope`
+/// - `Timestamp`
+/// - `Binary`
+/// - `DateTime`
+/// - `Decimal128`
+///
+/// ## Use caution in production
+///
+/// `enforce_indexes`, `enforce_validation`, and `enforce_schema` apply changes directly to your database,
+/// and may come in conflict with existing database state (e.g. existing named indexes). They are best suited
+/// for development or simple use cases.
+///
+/// For more advanced setups (e.g. production migrations), use the lower-level API:
+///
+/// ```rust
+/// for metadata in khan::meta::entity_metadata() {
+///     println!("Collection: {}", metadata.collection_name);
+///     // Handle custom migration, validation, or indexing logic here
+/// }
+/// ```
+///
+/// Each `EntityMetadata` item includes declared indexes and validation rules for one entity, giving you full
+/// control over how they're applied.
+mod indexes_and_schema_validation {}
 
 /// This library is named "`khan`" because "Mongo" is a prefix to "Mongolia".
 mod naming {}

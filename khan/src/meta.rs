@@ -16,6 +16,7 @@ pub struct __PRIVATE__EntityMetadataWrapper(pub EntityMetadata);
 
 inventory::collect!(__PRIVATE__EntityMetadataWrapper);
 
+/// Metadata describing an entity’s collection name, indexes, and validation rules.
 pub struct EntityMetadata {
     collection_name: &'static str,
     indexes_ptr: fn() -> Vec<IndexModel>,
@@ -26,6 +27,7 @@ pub struct EntityMetadata {
 }
 
 impl EntityMetadata {
+    /// Constructs metadata for a given entity type `E`.
     pub const fn of_entity<E: Entity>() -> Self {
         Self {
             collection_name: E::COLLECTION_NAME,
@@ -36,6 +38,9 @@ impl EntityMetadata {
         }
     }
 
+    /// Constructs metadata for an entity along with its JSON Schema definition.
+    ///
+    /// Requires the entity to implement [`schemars::JsonSchema`] and the `schema` feature to be enabled.
     #[cfg(feature = "schema")]
     pub const fn of_entity_with_schema<E: Entity + schemars::JsonSchema>() -> Self {
         Self {
@@ -46,18 +51,23 @@ impl EntityMetadata {
         }
     }
 
+    /// Returns the name of the `MongoDB` collection associated with the entity.
     pub fn collection_name(&self) -> &'static str {
         self.collection_name
     }
 
+    /// Returns the list of indexes defined for the entity's collection.
     pub fn indexes(&self) -> Vec<IndexModel> {
         (self.indexes_ptr)()
     }
 
+    /// Returns the query validation rule for the entity, if one is defined.
     pub fn query_validation(&self) -> Option<Document> {
         (self.query_validation_ptr)()
     }
 
+    /// Returns the JSON Schema for the entity, if schema validation is enabled.
+    ///
     /// ### Panics
     /// This method panics if `JsonSchema`s of any of the entities contain keywords or types unsupported by
     /// `MongoDB`, such as `$ref` or `integer`.
@@ -125,12 +135,20 @@ impl EntityMetadata {
     }
 }
 
+/// Returns an iterator over metadata for all defined entities in the crate.
 pub fn entity_metadata() -> impl Iterator<Item = &'static EntityMetadata> {
     inventory::iter::<__PRIVATE__EntityMetadataWrapper>
         .into_iter()
         .map(|wrapper| &wrapper.0)
 }
 
+/// Ensures that all indexes declared via `#[entity(indexes(...))]` are present in the database.
+///
+/// This will create declared indexes on all known entities. Existing indexes are left unchanged, and
+/// conflicting definitions will result in error.
+///
+/// Intended for development or simple production use. For more complex
+/// scenarios (e.g. index migrations), use [`entity_metadata`] to implement a custom workflow.
 pub async fn enforce_indexes(mongo: Mongo<'_>) -> Result<()> {
     for metadata in entity_metadata() {
         let indexes = metadata.indexes();
@@ -149,6 +167,15 @@ pub async fn enforce_indexes(mongo: Mongo<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Applies query validation and JSON Schema validation rules for all defined entities.
+///
+/// This sets the validation rules for each collection based on:
+/// - `#[entity(query_validation = ...)]`
+/// - JSON Schema (if the `schema` feature is enabled and the entity implements `JsonSchema`)
+///
+/// Intended for development or simple use cases.
+/// For advanced workflows or schema migrations, use [`entity_metadata`] to apply rules manually.
+///
 /// ### Panics
 /// This function panics if `JsonSchema`s of any of the entities contain keywords or types unsupported by
 /// `MongoDB`, such as `$ref` or `integer`.
@@ -159,8 +186,6 @@ pub async fn enforce_validation(mongo: Mongo<'_>) -> Result<()> {
         .await?
         .into_iter()
         .collect::<HashSet<_>>();
-
-    dbg!(&existing_collections);
 
     for metadata in entity_metadata() {
         let query_validator = metadata
@@ -187,8 +212,6 @@ pub async fn enforce_validation(mongo: Mongo<'_>) -> Result<()> {
         let validator = query_validator;
 
         if let Some(validator) = validator {
-            dbg!(metadata.collection_name());
-            dbg!(existing_collections.contains(metadata.collection_name()));
             if existing_collections.contains(metadata.collection_name()) {
                 mongo
                     .db

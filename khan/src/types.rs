@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use mongodb::bson;
 use schemars::JsonSchema;
 use schemars::schema::SchemaObject;
