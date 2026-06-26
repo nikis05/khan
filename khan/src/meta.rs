@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::{Entity, Mongo};
 use mongodb::{
     IndexModel,
-    bson::{self, Document, doc},
+    bson::{Document, doc},
     error::Result,
 };
 
@@ -196,7 +196,7 @@ pub async fn enforce_validation(mongo: impl Mongo) -> Result<()> {
         let validator = {
             let schema_validator = metadata
                 .json_schema()
-                .map(|schema| doc! { "$jsonSchema": bson::to_bson(&schema).unwrap() });
+                .map(|schema| doc! { "$jsonSchema": mongodb::bson::to_bson(&schema).unwrap() });
 
             match (query_validator, schema_validator) {
                 (Some(query_validator), Some(schema_validator)) => {

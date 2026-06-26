@@ -94,7 +94,7 @@ use futures_util::{
     future::{BoxFuture, LocalBoxFuture},
 };
 use mongodb::{
-    ClientSession, Collection, Database, IndexModel,
+    ClientSession, Collection, Database,
     bson::{self, Bson, Document, bson, doc},
     error::Result,
 };
@@ -138,9 +138,9 @@ pub mod types;
 /// This trait should not be implemented manually — use `#[derive(Entity)]` instead.
 ///
 /// Types that derive `Entity`:
-/// - must also derive [`Serialize`](serde::Serialize) and [`Deserialize`](serde::Deserialize),
+/// - must also derive [`Serialize`] and [`Deserialize`](serde::Deserialize),
 /// - must have a field named `id` with `#[serde(rename = "_id")]`,
-/// - the type of the `id` field must implement [`Copy`](std::marker::Copy), and be serializable /
+/// - the type of the `id` field must implement [`Copy`], and be serializable /
 ///   deserializable to / from [`ObjectId`](mongodb::bson::oid::ObjectId).
 pub trait Entity: SelectableWithId<Self> + Serialize {
     /// Type of the entity’s primary key (`id` field).
@@ -178,7 +178,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     ///
     /// When deriving [`Entity`], the implementation is configured by the `#[entity(indexes(...))]` attribute.
     #[cfg(feature = "meta")]
-    fn indexes() -> Vec<IndexModel> {
+    fn indexes() -> Vec<mongodb::IndexModel> {
         vec![]
     }
 

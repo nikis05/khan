@@ -1,3 +1,4 @@
+#![cfg(all(feature = "meta", feature = "schema"))]
 #![allow(dead_code)]
 
 use khan::{

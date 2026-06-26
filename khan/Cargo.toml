@@ -17,9 +17,9 @@ schemars = { version = "0.8.22", optional = true }
 indexmap = "2.14.0"
 
 [features]
-default = ["meta", "schema"]
 meta = ["dep:inventory", "khan-macros/meta"]
 schema = ["meta", "dep:schemars", "khan-macros/schema"]
+guides = []
 
 [dev-dependencies]
 ctor = "0.4.1"

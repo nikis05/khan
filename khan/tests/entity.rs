@@ -1,3 +1,5 @@
+#![cfg(all(feature = "meta", feature = "schema"))]
+
 use khan::{Entity, Fields, Selectable};
 use khan_macros::async_test;
 use mongodb::bson::oid::ObjectId;

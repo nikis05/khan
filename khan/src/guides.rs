@@ -144,7 +144,7 @@
 /// | `Entity::delete`                  | Deletes multiple documents based on a filter.                                    | `User::delete(mongo, user::filter! { name: "Kit" }).await?;`                                            | `db.collection('user').deleteMany({ name: { $eq: "Kit" } });`                                 |  
 /// | `Entity::delete_one`              | Deletes a single document based on a filter.                                     | `Entity::delete_one(mongo, by_id(id)).await?;`                                                          | `db.collection('user').deleteOne({ _id: { $eq: id } });`                                      |  
 /// | `SelectableWithId::remove`        | Removes an existing entity from the database by id.                              | `user.remove(mongo).await?;`                                                                            | `db.collection('user').deleteOne({ _id: { $eq: user.id } });`                                 |
-mod getting_started {}
+pub mod getting_started {}
 
 /// # Filters and updates
 ///
@@ -497,7 +497,7 @@ mod getting_started {}
 /// ```
 ///
 /// This will remove the last comment from both the database and the local `post` instance.
-mod filters_and_updates {}
+pub mod filters_and_updates {}
 
 /// # Projections
 ///
@@ -582,7 +582,7 @@ mod filters_and_updates {}
 /// # RUNTIME.block_on(run(mongo())).unwrap();
 /// ```
 ///
-mod projections {}
+pub mod projections {}
 
 /// # Transactions and fencing
 ///
@@ -931,7 +931,7 @@ mod projections {}
 ///     Ok(())
 /// }
 /// ```
-mod transactions_and_fencing {}
+pub mod transactions_and_fencing {}
 
 /// # Patterns and Recommendations
 ///
@@ -1131,7 +1131,7 @@ mod transactions_and_fencing {}
 /// ```
 ///
 /// This keeps your API clean and expressive, while giving you full control over how each operation behaves.
-mod patterns_and_recommendations {}
+pub mod patterns_and_recommendations {}
 
 /// # Indexes and Schema Validation
 ///
@@ -1284,7 +1284,7 @@ mod patterns_and_recommendations {}
 ///
 /// Each `EntityMetadata` item includes declared indexes and validation rules for one entity, giving you full
 /// control over how they're applied.
-mod indexes_and_schema_validation {}
+pub mod indexes_and_schema_validation {}
 
 /// This library is named "`khan`" because "Mongo" is a prefix to "Mongolia".
-mod naming {}
+pub mod naming {}

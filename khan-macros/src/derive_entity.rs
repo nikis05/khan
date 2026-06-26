@@ -26,7 +26,7 @@ struct Attributes {
     #[cfg(feature = "meta")]
     #[darling(default)]
     query_validation: Option<Expr>,
-    #[cfg(feature = "schema")]
+    #[cfg(all(feature = "meta", feature = "schema"))]
     #[darling(default)]
     skip_schema_validation: bool,
 }
@@ -203,7 +203,7 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
                     };
 
                     Ok((
-                        field.rename.to_owned().unwrap_or_else(|| key.to_string()),
+                        field.rename.clone().unwrap_or_else(|| key.to_string()),
                         direction,
                     ))
                 })
@@ -230,7 +230,7 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
         attributes.untyped_indexes.iter(),
         #[cfg(feature = "meta")]
         attributes.query_validation.as_ref(),
-        #[cfg(feature = "schema")]
+        #[cfg(all(feature = "meta", feature = "schema"))]
         attributes.skip_schema_validation,
     );
 
@@ -256,6 +256,7 @@ struct IndexConfig {
 }
 
 #[allow(clippy::extra_unused_lifetimes)]
+#[allow(clippy::too_many_arguments)]
 fn build<'a>(
     vis: &Visibility,
     ident: &Ident,
@@ -266,7 +267,7 @@ fn build<'a>(
     #[cfg(feature = "meta")] indexes: &[IndexConfig],
     #[cfg(feature = "meta")] untyped_indexes: impl Iterator<Item = &'a Expr>,
     #[cfg(feature = "meta")] query_validation: Option<&Expr>,
-    #[cfg(feature = "schema")] skip_schema_validation: bool,
+    #[cfg(all(feature = "meta", feature = "schema"))] skip_schema_validation: bool,
 ) -> TokenStream {
     let krate = krate();
     let mongodb = mongodb();
@@ -399,7 +400,7 @@ fn build<'a>(
             .iter()
             .map(|index_config| {
                 let keys = index_config.keys.iter().map(|(key, direction)| {
-                    let key_lit = LitStr::new(&key.to_string(), Span::call_site());
+                    let key_lit = LitStr::new(&key.clone(), Span::call_site());
                     let direction_value = match direction {
                         IndexDirection::Pos => quote! { 1 },
                         IndexDirection::Neg => quote! { -1 },

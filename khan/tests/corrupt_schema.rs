@@ -1,3 +1,5 @@
+#![cfg(all(feature = "meta", feature = "schema"))]
+
 use khan::Entity;
 use serde::{Deserialize, Serialize};
 

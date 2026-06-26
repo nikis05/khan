@@ -1,5 +1,5 @@
 set dotenv-load := false
-set default-list := true
+set default-list
 
 mongo_container := "khan-mongo-test"
 mongo_port := "27017"
@@ -15,21 +15,24 @@ mongo_wait_primary := if external_mongodb_uri == "" { "until docker exec " + mon
 mongo_down_message := if external_mongodb_uri == "" { ":" } else { "echo 'Using KHAN_TEST_MONGODB_URI; no local MongoDB container to remove.'" }
 
 mongo-up:
-    @{{mongo_up_message}}
-    @-{{mongo_remove_existing}}
-    @{{mongo_run}}
-    @{{mongo_wait_ping}}
-    @{{mongo_init_repl_set}}
-    @{{mongo_wait_primary}}
+    @{{ mongo_up_message }}
+    @-{{ mongo_remove_existing }}
+    @{{ mongo_run }}
+    @{{ mongo_wait_ping }}
+    @{{ mongo_init_repl_set }}
+    @{{ mongo_wait_primary }}
 
 mongo-down:
-    @{{mongo_down_message}}
-    @-{{mongo_remove_existing}}
+    @{{ mongo_down_message }}
+    @-{{ mongo_remove_existing }}
 
 clippy:
-    cargo clippy --manifest-path khan/Cargo.toml --all-targets --all-features --no-deps
+    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps
+    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --features meta
+    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --features schema
+    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --all-features
 
 test: mongo-up && mongo-down
-    KHAN_TEST_MONGODB_URI='{{mongodb_uri}}' cargo test --manifest-path khan/Cargo.toml --all-features
+    KHAN_TEST_MONGODB_URI='{{ mongodb_uri }}' cargo test --manifest-path khan/Cargo.toml --all-features
 
 check: clippy test
