@@ -9,7 +9,7 @@
 //! # use mongodb::bson::oid::ObjectId;
 //! # use serde::{Deserialize, Serialize};
 //! # async fn run() -> mongodb::error::Result<()> {
-//! # let mut mongo = mongo();
+//! # let mongo = mongo();
 //! // Define an entity
 //! #[derive(Serialize, Deserialize, Entity, Debug, PartialEq, Eq)]
 //! #[entity(skip_schema_validation, collection = "readme_user", projections(Profile(id, email, password)))]
@@ -30,38 +30,38 @@
 //! };
 //! let user_id = user.id;
 //!
-//! user.insert(mongo.rb()).await?;
+//! user.insert(mongo).await?;
 //!
 //! // Select an entity by id
-//! let person: User = User::find_one(mongo.rb(), by_id(user_id)).await?.unwrap();
+//! let person: User = User::find_one(mongo, by_id(user_id)).await?.unwrap();
 //! # assert_eq!(person.email, "mail@example.com");
 //!
 //! // Select an entity by custom fields
-//! let recent_user: User = User::find_one(mongo.rb(), user::filter! {
+//! let recent_user: User = User::find_one(mongo, user::filter! {
 //!   username: "nikis05"
 //! }).await?.unwrap();
 //! # assert_eq!(recent_user.id, user_id);
 //!
 //! // Select only necessary fields (email, password) of entity
-//! let profile: user::Profile = user::Profile::find_one(mongo.rb(), by_id(user_id)).await?.unwrap();
+//! let profile: user::Profile = user::Profile::find_one(mongo, by_id(user_id)).await?.unwrap();
 //! # assert_eq!(profile.password, "somepassword");
 //!
 //! // Update an entity in the database
-//! User::update_one(mongo.rb(), by_id(user_id), user::update! {
+//! User::update_one(mongo, by_id(user_id), user::update! {
 //!   email: "new.email@example.com".into()
 //! }).await?;
-//! # assert_eq!(User::find_one(mongo.rb(), by_id(user_id)).await?.unwrap().email, "new.email@example.com");
+//! # assert_eq!(User::find_one(mongo, by_id(user_id)).await?.unwrap().email, "new.email@example.com");
 //!
 //! // Update an entity in the database (struct is automatically updated)
-//! let mut user = User::find_one(mongo.rb(), by_id(user_id)).await?.unwrap();
-//! user.patch(mongo.rb(), user::update! {
+//! let mut user = User::find_one(mongo, by_id(user_id)).await?.unwrap();
+//! user.patch(mongo, user::update! {
 //!   email: "newer.email@example.com".into(),
 //!   password: "someotherpassword".into()
 //! }).await?;
 //! # assert_eq!(user.password, "someotherpassword");
 //!
 //! // Delete entities matching the filter
-//! let result = User::delete_one(mongo.rb(), by_id(user_id)).await?;
+//! let result = User::delete_one(mongo, by_id(user_id)).await?;
 //! # assert!(result.deleted());
 //!
 //! // Remove a document from the database that corresponds to an instance
@@ -72,9 +72,9 @@
 //!   password: "temporary".into(),
 //! };
 //! let removable_id = removable.id;
-//! removable.insert(mongo.rb()).await?;
-//! removable.remove(mongo.rb()).await?;
-//! # assert!(User::find_one(mongo.rb(), by_id(removable_id)).await?.is_none());
+//! removable.insert(mongo).await?;
+//! removable.remove(mongo).await?;
+//! # assert!(User::find_one(mongo, by_id(removable_id)).await?.is_none());
 //! # Ok(())
 //! # }
 //! # RUNTIME.block_on(run()).unwrap();
@@ -89,10 +89,13 @@
     clippy::missing_errors_doc
 )]
 
-use futures_util::{FutureExt, TryStreamExt, future::BoxFuture};
+use futures_util::{
+    FutureExt, TryStreamExt,
+    future::{BoxFuture, LocalBoxFuture},
+};
 use mongodb::{
     ClientSession, Collection, Database, IndexModel,
-    bson::{self, Bson, Document, bson, doc, oid::ObjectId},
+    bson::{self, Bson, Document, bson, doc},
     error::Result,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -144,7 +147,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     ///
     /// Typically this is `ObjectId`, or a newtype wrapper around it.
     /// The type must serialize and deserialize compatibly with `MongoDB`'s `_id` field.
-    type Id: Copy + Serialize + Send + 'static;
+    type Id: Clone + Serialize + Send + 'static;
 
     /// Enum representing the entity’s field names, used for sorting and indexing.
     ///
@@ -191,13 +194,15 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     }
 
     /// Counts the number of documents in the collection matching the given filter.
-    fn count<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<u64>> {
+    fn count<'a>(
+        mut mongo: impl Mongo + 'a,
+        filter: impl Filter<Self> + 'a,
+    ) -> BoxFuture<'a, Result<u64>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = Self::collection(db);
+            let collection = Self::collection(mongo.db());
+            let filter = filter.to_document()?;
 
-            let count =
-                with_session!(collection.count_documents(filter.to_document()), session).await?;
+            let count = with_session!(collection.count_documents(filter), mongo.session()).await?;
 
             Ok(count)
         }
@@ -205,7 +210,10 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     }
 
     /// Checks whether any documents match the given filter.
-    fn exists<'a>(mongo: Mongo<'a>, filter: impl Filter<Self> + 'a) -> BoxFuture<'a, Result<bool>> {
+    fn exists<'a>(
+        mongo: impl Mongo + 'a,
+        filter: impl Filter<Self> + 'a,
+    ) -> BoxFuture<'a, Result<bool>> {
         async move {
             let count = Self::count(mongo, filter).await?;
 
@@ -215,85 +223,92 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     }
 
     /// Inserts this entity into the corresponding `MongoDB` collection.
-    fn insert<'a>(&'a self, mongo: Mongo<'a>) -> BoxFuture<'a, Result<()>> {
+    fn insert<'a>(&'a self, mut mongo: impl Mongo + 'a) -> BoxFuture<'a, Result<()>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = Self::collection(db);
+            let collection = Self::collection(mongo.db());
 
-            with_session!(collection.insert_one(self), session).await?;
+            with_session!(collection.insert_one(self), mongo.session()).await?;
 
             Ok(())
         }
         .boxed()
     }
 
-    /// Like [`insert`](Entity::insert), but returns a `Lock<Self>` to indicate the document is locked
-    /// for the rest of the current transaction.
+    /// Like [`insert`](Entity::insert), but returns a [`Fence<Self>`] to indicate the document is protected
+    /// by this transaction.
     ///
     /// Because the document is newly inserted within the same transaction, it is not visible to other
-    /// operations and are safe from concurrent modification.
+    /// operations until the transaction commits.
     ///
-    /// The returned [`Lock`] acts as a type-level guarantee of that isolation.
-    fn locking_insert(self, trx: Transaction<'_>) -> BoxFuture<'_, Result<Lock<Self>>> {
+    /// The returned [`Fence`] acts as a type-level marker that later code can require before creating
+    /// dependent records.
+    fn insert_and_fence<'a>(self, trx: impl Transaction + 'a) -> BoxFuture<'a, Result<Fence<Self>>>
+    where
+        Self: 'a,
+    {
         async move {
-            Self::insert(&self, trx.into()).await?;
+            Self::insert(&self, trx).await?;
 
-            Ok(Lock(self))
+            Ok(Fence(self))
         }
         .boxed()
     }
 
     /// Inserts multiple entities into the collection in a single batch operation.
-    fn insert_many<'a>(mongo: Mongo<'a>, entities: &'a [Self]) -> BoxFuture<'a, Result<()>> {
+    fn insert_many<'a>(
+        mut mongo: impl Mongo + 'a,
+        entities: &'a [Self],
+    ) -> BoxFuture<'a, Result<()>> {
         async move {
             if entities.is_empty() {
                 return Ok(());
             }
 
-            let Mongo { db, session } = mongo;
-            let collection = Self::collection(db);
+            let collection = Self::collection(mongo.db());
 
-            with_session!(collection.insert_many(entities), session).await?;
+            with_session!(collection.insert_many(entities), mongo.session()).await?;
 
             Ok(())
         }
         .boxed()
     }
 
-    /// Like [`insert_many`](Entity::insert_many), but returns a `Vec<Lock<Self>>` to indicate that all
-    /// inserted documents are locked for the duration of the current transaction.
+    /// Like [`insert_many`](Entity::insert_many), but returns a `Vec<Fence<Self>>` to indicate that all
+    /// inserted documents are protected by this transaction.
     ///
     /// Because the documents are newly inserted within the same transaction, they are not visible to other
-    /// operations and are safe from concurrent modification.
+    /// operations until the transaction commits.
     ///
-    /// The returned [`Lock`]s act as a type-level guarantee of that isolation.
-    fn locking_insert_many(
-        trx: Transaction<'_>,
+    /// The returned [`Fence`]s act as type-level markers that later code can require before creating
+    /// dependent records.
+    fn insert_many_and_fence<'a>(
+        trx: impl Transaction + 'a,
         entities: Vec<Self>,
-    ) -> BoxFuture<'_, Result<Vec<Lock<Self>>>> {
+    ) -> BoxFuture<'a, Result<Vec<Fence<Self>>>>
+    where
+        Self: 'a,
+    {
         async move {
-            Self::insert_many(trx.into(), &entities).await?;
+            Self::insert_many(trx, &entities).await?;
 
-            Ok(entities.into_iter().map(Lock).collect())
+            Ok(entities.into_iter().map(Fence).collect())
         }
         .boxed()
     }
 
     /// Updates all documents matching the given filter using the provided update.
     fn update<'a>(
-        mongo: Mongo<'a>,
+        mut mongo: impl Mongo + 'a,
         filter: impl Filter<Self> + 'a,
         update: impl Update<Self> + 'a,
     ) -> BoxFuture<'a, Result<UpdateResult>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = Self::collection(db);
+            let collection = Self::collection(mongo.db());
+            let filter = filter.to_document()?;
+            let update = update.to_document()?;
 
-            let result = with_session!(
-                collection.update_many(filter.to_document(), update.to_document()),
-                session
-            )
-            .await?;
+            let result =
+                with_session!(collection.update_many(filter, update), mongo.session()).await?;
 
             Ok(UpdateResult(result))
         }
@@ -302,45 +317,45 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
 
     /// Updates a single document matching the given filter using the provided update.
     fn update_one<'a>(
-        mongo: Mongo<'a>,
+        mut mongo: impl Mongo + 'a,
         filter: impl Filter<Self> + 'a,
         update: impl Update<Self> + 'a,
     ) -> BoxFuture<'a, Result<UpdateResult>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = Self::collection(db);
+            let collection = Self::collection(mongo.db());
+            let filter = filter.to_document()?;
+            let update = update.to_document()?;
 
-            let result = with_session!(
-                collection.update_one(filter.to_document(), update.to_document()),
-                session
-            )
-            .await?;
+            let result =
+                with_session!(collection.update_one(filter, update), mongo.session()).await?;
 
             Ok(UpdateResult(result))
         }
         .boxed()
     }
 
-    /// Updates a document by ID and returns a `Lock<Self::Id>` to mark it as locked for the remainder of the
+    /// Updates a document by ID and returns a [`Fence<Self::Id>`] for use by later operations in the same
     /// transaction.
     ///
-    /// In addition to applying the provided update, this method also modifies a dummy field (`_lock.seed`) to
-    /// ensure that the document is write-locked — even if the given update wouldn’t otherwise change any data.
-    /// This prevents concurrent transactions from modifying or deleting the document.
+    /// In addition to applying the provided update, this method increments Khan's internal `__fence` field to
+    /// force a write conflict if another transaction concurrently modifies or deletes the same document.
     ///
     /// If no document with the given ID exists, returns `None`.
-    fn locking_update_by_id<'a>(
-        mut trx: Transaction<'a>,
+    fn update_by_id_and_fence<'a>(
+        mut trx: impl Transaction + 'a,
         id: Self::Id,
         update: impl Update<Self> + 'a,
-    ) -> BoxFuture<'a, Result<Option<Lock<Self::Id>>>> {
+    ) -> BoxFuture<'a, Result<Option<Fence<Self::Id>>>> {
         async move {
-            let result =
-                Self::update_one(trx.rb().into(), by_id(id), merge_lock_into_update(&update)?)
-                    .await?;
+            let result = Self::update_one(
+                &mut trx,
+                by_id(id.clone()),
+                merge_fence_into_update(&update)?,
+            )
+            .await?;
 
             Ok(if result.matched() {
-                Some(Lock(id))
+                Some(Fence(id))
             } else {
                 None
             })
@@ -348,27 +363,27 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
-    /// Locks a document by ID for the duration of the current transaction, without applying any meaningful
-    /// update.
+    /// Fences a document by ID for use by later operations in the same transaction, without applying any
+    /// domain-level update.
     ///
-    /// This method performs a dummy update on the `_lock.seed` field to trigger `MongoDB`'s write conflict
-    /// detection, ensuring that the document cannot be modified or deleted concurrently.
+    /// This method increments Khan's internal `__fence` field to trigger `MongoDB` write conflict detection
+    /// if another transaction concurrently modifies or deletes the same document.
     ///
     /// If no document with the given ID exists, returns `None`.
-    fn lock_by_id(
-        trx: Transaction<'_>,
+    fn fence_by_id<'a>(
+        trx: impl Transaction + 'a,
         id: Self::Id,
-    ) -> BoxFuture<'_, Result<Option<Lock<Self::Id>>>> {
+    ) -> BoxFuture<'a, Result<Option<Fence<Self::Id>>>> {
         async move {
             let result = Self::update_one(
-                trx.into(),
-                by_id(id),
-                UntypedUpdate::new(doc! { "$set": { "_lock": { "seed": ObjectId::new() } } }),
+                trx,
+                by_id(id.clone()),
+                UntypedUpdate::new(doc! { "$inc": { "__fence": 1 } }),
             )
             .await?;
 
             Ok(if result.matched() {
-                Some(Lock(id))
+                Some(Fence(id))
             } else {
                 None
             })
@@ -378,15 +393,14 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
 
     /// Deletes all documents matching the given filter.
     fn delete<'a>(
-        mongo: Mongo<'a>,
+        mut mongo: impl Mongo + 'a,
         filter: impl Filter<Self> + 'a,
     ) -> BoxFuture<'a, Result<DeleteResult>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = Self::collection(db);
+            let collection = Self::collection(mongo.db());
+            let filter = filter.to_document()?;
 
-            let result =
-                with_session!(collection.delete_many(filter.to_document()), session).await?;
+            let result = with_session!(collection.delete_many(filter), mongo.session()).await?;
 
             Ok(DeleteResult(result))
         }
@@ -395,15 +409,14 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
 
     /// Deletes the first document that matches the given filter.
     fn delete_one<'a>(
-        mongo: Mongo<'a>,
+        mut mongo: impl Mongo + 'a,
         filter: impl Filter<Self> + 'a,
     ) -> BoxFuture<'a, Result<DeleteResult>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = Self::collection(db);
+            let collection = Self::collection(mongo.db());
+            let filter = filter.to_document()?;
 
-            let result =
-                with_session!(collection.delete_one(filter.to_document()), session).await?;
+            let result = with_session!(collection.delete_one(filter), mongo.session()).await?;
 
             Ok(DeleteResult(result))
         }
@@ -454,33 +467,31 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
     }
 
     /// Finds documents matching the given filter, returning this projection type, with optional pagination
-    /// and sorting.
+    /// and sorting configured by [`FindOptions`].
     fn find_with_opts<'a>(
-        mongo: Mongo<'a>,
+        mut mongo: impl Mongo + 'a,
         filter: impl Filter<E> + 'a,
-        skip: Option<u64>,
-        limit: Option<i64>,
-        sort: Option<IndexMap<E::Fields, Order>>,
+        opts: FindOptions<E>,
     ) -> BoxFuture<'a, Result<Vec<Self>>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = db.collection(E::COLLECTION_NAME);
+            let collection = mongo.db().collection(E::COLLECTION_NAME);
+            let filter = filter.to_document()?;
 
-            let mut query = collection.find(filter.to_document());
+            let mut query = collection.find(filter);
 
             if let Some(projection) = Self::projection() {
                 query = query.projection(projection);
             }
 
-            if let Some(skip) = skip {
+            if let Some(skip) = opts.skip {
                 query = query.skip(skip);
             }
 
-            if let Some(limit) = limit {
+            if let Some(limit) = opts.limit {
                 query = query.limit(limit);
             }
 
-            if let Some(sort) = sort {
+            if let Some(sort) = opts.sort {
                 let sort_doc = sort
                     .into_iter()
                     .map(|(k, v)| {
@@ -496,7 +507,7 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
                 query = query.sort(sort_doc);
             }
 
-            let entities = match session {
+            let entities = match mongo.session() {
                 Some(session) => {
                     query
                         .session(&mut *session)
@@ -514,101 +525,162 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
     }
 
     /// Finds all documents matching the given filter and returns them as a list of this projection type.
-    fn find<'a>(mongo: Mongo<'a>, filter: impl Filter<E> + 'a) -> BoxFuture<'a, Result<Vec<Self>>> {
-        Self::find_with_opts(mongo, filter, None, None, None)
+    fn find<'a>(
+        mongo: impl Mongo + 'a,
+        filter: impl Filter<E> + 'a,
+    ) -> BoxFuture<'a, Result<Vec<Self>>> {
+        Self::find_with_opts(mongo, filter, FindOptions::new())
     }
 
     /// Finds the first document matching the given filter and returns it  as this projection type, or `None`
     /// if no document matches.
     fn find_one<'a>(
-        mongo: Mongo<'a>,
+        mut mongo: impl Mongo + 'a,
         filter: impl Filter<E> + 'a,
     ) -> BoxFuture<'a, Result<Option<Self>>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = db.collection(E::COLLECTION_NAME);
+            let collection = mongo.db().collection(E::COLLECTION_NAME);
+            let filter = filter.to_document()?;
 
-            let mut query = collection.find_one(filter.to_document());
+            let mut query = collection.find_one(filter);
             if let Some(projection) = Self::projection() {
                 query = query.projection(projection);
             }
 
-            let entity = with_session!(query, session).await?;
+            let entity = with_session!(query, mongo.session()).await?;
 
             Ok(entity)
         }
         .boxed()
     }
 
-    /// Finds a single document matching the given filter and locks it for the duration of the current
-    /// transaction.
+    /// Finds a single document matching the given filter and returns it wrapped in a [`Fence`].
     ///
-    /// This method performs a dummy update on the `_lock.seed` field to ensure the document is write-locked,
-    /// preventing concurrent modification or deletion.
+    /// This method increments Khan's internal `__fence` field to force a write conflict if another
+    /// transaction concurrently modifies or deletes the same document.
     ///
     /// Returns `None` if no documents are found.
-    fn locking_find_one<'a>(
-        trx: Transaction<'a>,
+    fn find_one_and_fence<'a>(
+        trx: impl Transaction + 'a,
         filter: impl Filter<E> + 'a,
-    ) -> BoxFuture<'a, Result<Option<Lock<Self>>>> {
+    ) -> BoxFuture<'a, Result<Option<Fence<Self>>>> {
         async move {
             let entity = Self::find_one_and_update(
-                trx.into(),
+                trx,
                 filter,
-                UntypedUpdate::new(doc! { "$set": { "_lock": { "seed": ObjectId::new() } } }),
+                UntypedUpdate::new(doc! { "$inc": { "__fence": 1 } }),
             )
             .await?;
 
-            Ok(entity.map(Lock))
+            Ok(entity.map(Fence))
         }
         .boxed()
     }
 
-    /// Finds a single document matching the given filter, applies the update, and returns the updated document
+    /// Finds a single document matching the given filter, applies the update, and returns the matched document
     /// using this projection type.
+    ///
+    /// This follows `MongoDB`'s default `findOneAndUpdate` semantics: the returned document is the document
+    /// as it existed before the update was applied. Use [`Selectable::find_one`] after this call if you need
+    /// to read the updated document.
+    ///
+    /// Returns `None` if no document matches the filter.
     fn find_one_and_update<'a>(
-        mongo: Mongo<'a>,
+        mut mongo: impl Mongo + 'a,
         filter: impl Filter<E> + 'a,
         update: impl Update<E> + 'a,
     ) -> BoxFuture<'a, Result<Option<Self>>> {
         async move {
-            let Mongo { db, session } = mongo;
-            let collection = db.collection(E::COLLECTION_NAME);
+            let collection = mongo.db().collection(E::COLLECTION_NAME);
+            let filter = filter.to_document()?;
+            let update = update.to_document()?;
 
-            let mut query =
-                collection.find_one_and_update(filter.to_document(), update.to_document());
+            let mut query = collection.find_one_and_update(filter, update);
 
             if let Some(projection) = Self::projection() {
                 query = query.projection(projection);
             }
 
-            let entity = with_session!(query, session).await?;
+            let entity = with_session!(query, mongo.session()).await?;
 
             Ok(entity)
         }
         .boxed()
     }
 
-    /// Finds a single document matching the filter, applies the update, and returns the updated document
-    /// wrapped in a [`Lock<Self>`].
+    /// Finds a single document matching the filter, applies the update, and returns the matched document
+    /// wrapped in a [`Fence<Self>`].
     ///
-    /// In addition to the given update, this method performs a dummy write to `_lock.seed` to ensure the
-    /// document is locked for the duration of the current transaction.
+    /// This follows `MongoDB`'s default `findOneAndUpdate` semantics: the fenced value is the document as it
+    /// existed before the update was applied.
+    ///
+    /// In addition to the given update, this method increments Khan's internal `__fence` field to force a
+    /// write conflict if another transaction concurrently modifies or deletes the same document.
     ///
     /// Returns `None` if no document matches the filter.
-    fn locking_find_one_and_update<'a>(
-        trx: Transaction<'a>,
+    fn find_one_and_update_and_fence<'a>(
+        trx: impl Transaction + 'a,
         filter: impl Filter<E> + 'a,
         update: impl Update<E> + 'a,
-    ) -> BoxFuture<'a, Result<Option<Lock<Self>>>> {
+    ) -> BoxFuture<'a, Result<Option<Fence<Self>>>> {
         async move {
             let entity =
-                Self::find_one_and_update(trx.into(), filter, merge_lock_into_update(&update)?)
-                    .await?;
+                Self::find_one_and_update(trx, filter, merge_fence_into_update(&update)?).await?;
 
-            Ok(entity.map(Lock))
+            Ok(entity.map(Fence))
         }
         .boxed()
+    }
+}
+
+/// Options for [`Selectable::find_with_opts`].
+#[derive(Debug)]
+pub struct FindOptions<E: Entity> {
+    skip: Option<u64>,
+    limit: Option<i64>,
+    sort: Option<IndexMap<E::Fields, Order>>,
+}
+
+impl<E: Entity> FindOptions<E> {
+    /// Creates empty find options.
+    pub fn new() -> Self {
+        Self {
+            skip: None,
+            limit: None,
+            sort: None,
+        }
+    }
+
+    /// Sets the number of matching documents to skip.
+    pub fn skip(mut self, skip: u64) -> Self {
+        self.skip = Some(skip);
+        self
+    }
+
+    /// Sets the maximum number of documents to return.
+    pub fn limit(mut self, limit: i64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Sets the full typed sort specification.
+    pub fn sort(mut self, sort: IndexMap<E::Fields, Order>) -> Self {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// Appends or replaces one field in the typed sort specification.
+    pub fn sort_by(mut self, field: E::Fields, order: Order) -> Self {
+        self.sort
+            .get_or_insert_with(IndexMap::new)
+            .insert(field, order);
+        self
+    }
+}
+
+impl<E: Entity> Default for FindOptions<E> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -628,16 +700,13 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
     /// (e.g. because it has already been deleted from the database).
     fn patch<'a>(
         &'a mut self,
-        mongo: Mongo<'a>,
+        mongo: impl Mongo + 'a,
         update: impl Update<E> + UpdateApply<Self> + 'a,
     ) -> BoxFuture<'a, Result<UpdateResult>> {
         async move {
-            let result = E::update_one(
-                mongo,
-                by_id(self.id()),
-                UntypedUpdate::new(update.to_document()),
-            )
-            .await?;
+            let update_document = update.to_document()?;
+            let result =
+                E::update_one(mongo, by_id(self.id()), UntypedUpdate::new(update_document)).await?;
 
             update.apply(self)?;
 
@@ -646,22 +715,21 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
         .boxed()
     }
 
-    /// Updates the document in the database and the local struct, returning it wrapped in a [`Lock`] to mark
-    /// it as locked for the remainder of the transaction.
+    /// Updates the document in the database and the local struct, returning it wrapped in a [`Fence`].
     ///
-    /// In addition to applying the provided update, this method also performs a dummy write to the
-    /// `_lock.seed` field. This ensures the document is write-locked, even if the update wouldn't otherwise
-    /// modify any fields — preventing concurrent transactions from modifying or deleting it.
+    /// In addition to applying the provided update, this method increments Khan's internal `__fence` field to
+    /// force a write conflict if another transaction concurrently modifies or deletes the same document.
     ///
-    /// Returns `Some(Lock<Self>)` if the document was updated, or `None` if no matching document was found.
-    fn locking_patch<'a>(
+    /// Returns `Some(Fence<Self>)` if the document was updated, or `None` if no matching document was found.
+    fn patch_and_fence<'a>(
         mut self,
-        trx: Transaction<'a>,
+        trx: impl Transaction + 'a,
         update: impl Update<E> + UpdateApply<Self> + 'a,
-    ) -> BoxFuture<'a, Result<Option<Lock<Self>>>> {
+    ) -> BoxFuture<'a, Result<Option<Fence<Self>>>> {
         async move {
+            let update_document = update.to_document()?;
             let result =
-                E::locking_update_by_id(trx, self.id(), UntypedUpdate::new(update.to_document()))
+                E::update_by_id_and_fence(trx, self.id(), UntypedUpdate::new(update_document))
                     .await?;
 
             if result.is_none() {
@@ -670,73 +738,38 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
 
             update.apply(&mut self)?;
 
-            Ok(Some(Lock(self)))
+            Ok(Some(Fence(self)))
         }
         .boxed()
     }
 
     /// Deletes the corresponding document from the database by its `id`.
-    fn remove<'a>(&'a self, mongo: Mongo<'a>) -> BoxFuture<'a, Result<DeleteResult>> {
+    fn remove<'a>(&'a self, mongo: impl Mongo + 'a) -> BoxFuture<'a, Result<DeleteResult>> {
         E::delete_one(mongo, by_id(self.id()))
     }
 }
 
-/// A lightweight wrapper around a `MongoDB` database reference, optionally paired with a transaction.
-#[derive(Debug)]
-pub struct Mongo<'a> {
-    /// Reference to the `MongoDB` database instance.
-    pub db: &'a Database,
-    /// Optional mutable reference to the current transaction session.
-    pub session: Option<&'a mut ClientSession>,
-}
-
-impl<'a> Mongo<'a> {
-    /// Creates a new `Mongo` instance without a transaction.
-    pub fn new(db: &'a Database) -> Self {
-        Self { db, session: None }
-    }
-
-    /// Creates a new `Mongo` instance with a transactional session.
-    pub fn new_with_session(db: &'a Database, session: &'a mut ClientSession) -> Self {
-        Self {
-            db,
-            session: Some(session),
-        }
-    }
-
-    /// Returns a reborrowed `Mongo` instance for repeated use.
-    ///
-    /// Since `Mongo` is passed by value in most APIs, use this method to call multiple operations without
-    /// consuming the original instance.
-    pub fn rb(&mut self) -> Mongo<'_> {
-        Mongo {
-            db: self.db,
-            session: self.session.as_deref_mut(),
-        }
-    }
-
+/// Extension methods for [`Database`] that integrate it with Khan.
+pub trait DatabaseExt {
     /// Runs a sequence of operations inside a `MongoDB` transaction.
     ///
-    /// This method handles starting, committing, and aborting the transaction automatically. It accepts a
-    /// context value that is passed to the callback, allowing you to carry external data through the
-    /// transactional flow.
+    /// This method accepts a context value that is passed to the callback on every transaction attempt.
+    /// This mirrors [`mongodb::action::StartTransaction::and_run`] and is useful when the callback needs to
+    /// borrow data across retries.
     ///
-    /// The callback receives a [`Transaction`] and a mutable reference to the context.
-    ///
-    /// The transaction is committed if the callback returns `Ok`, and aborted on error. May retry the entire
-    /// transaction if the callback returns a transient error, similar to
-    /// [`mongodb::action::StartTransaction::and_run`].
+    /// The callback receives a `(&Database, &mut ClientSession)` transaction context and a mutable reference
+    /// to the user-provided context.
     ///
     /// ### Example
     ///
     /// ```
     /// # use futures_util::FutureExt;
+    /// # use khan::{DatabaseExt, Mongo};
     /// # #[path = "test_support.rs"] mod test_support;
     /// # use test_support::{RUNTIME, mongo};
-    /// # async fn run(mut mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
+    /// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
     /// let output = mongo.run_transaction(("text", 42), |trx, (text, number)| async move {
-    ///     // use `trx` for database operations
-    ///     assert!(trx.db.name().starts_with("khan_test_"));
+    ///     assert!(trx.db().name().starts_with("khan_test_"));
     ///     Ok(text.len() + *number as usize)
     /// }.boxed()).await?;
     ///
@@ -745,79 +778,160 @@ impl<'a> Mongo<'a> {
     /// # }
     /// # RUNTIME.block_on(run(mongo())).unwrap();
     /// ```
-    pub async fn run_transaction<R, C: Send, F>(&mut self, context: C, callback: F) -> Result<R>
+    fn run_transaction<'a, R, C, F>(&'a self, context: C, callback: F) -> BoxFuture<'a, Result<R>>
     where
-        F: for<'b> FnMut(Transaction<'b>, &'b mut C) -> BoxFuture<'b, Result<R>> + Send,
-    {
-        let mut session = self.db.client().start_session().await?;
-        session
-            .start_transaction()
-            .and_run(
-                (self.db, context, callback),
-                |session, (db, context, callback)| {
-                    async move {
-                        let transaction = Transaction::new(db, session);
-                        let output = callback(transaction, context).await?;
-                        Ok(output)
-                    }
-                    .boxed()
-                },
-            )
-            .await
-    }
-}
+        R: Send + 'a,
+        C: Send + 'a,
+        F: for<'b> FnMut(
+                (&'b Database, &'b mut ClientSession),
+                &'b mut C,
+            ) -> BoxFuture<'b, Result<R>>
+            + Send
+            + 'a;
 
-impl<'a> From<&'a Database> for Mongo<'a> {
-    fn from(value: &'a Database) -> Self {
-        Self::new(value)
-    }
-}
-
-impl<'a> From<(&'a Database, &'a mut ClientSession)> for Mongo<'a> {
-    fn from(value: (&'a Database, &'a mut ClientSession)) -> Self {
-        Self::new_with_session(value.0, value.1)
-    }
-}
-
-/// Wrapper representing an active `MongoDB` transaction.
-#[derive(Debug)]
-pub struct Transaction<'a> {
-    /// Reference to the `MongoDB` database.
-    pub db: &'a Database,
-    /// Mutable reference to the active transactional session.
-    pub session: &'a mut ClientSession,
-}
-
-impl<'a> Transaction<'a> {
-    /// Creates a new [`Transaction`] from a database reference and a client session.
-    pub fn new(db: &'a Database, session: &'a mut ClientSession) -> Self {
-        Self { db, session }
-    }
-
-    /// Returns a reborrowed `Transaction<'_>` for repeated use.
+    /// Runs a sequence of operations inside a `MongoDB` transaction.
     ///
-    /// Since `Transaction` is passed by value in most APIs, use this method to call multiple operations
-    /// without consuming the original instance.
-    pub fn rb(&mut self) -> Transaction<'_> {
-        Transaction {
-            db: self.db,
-            session: &mut *self.session,
+    /// This method is similar to [`DatabaseExt::run_transaction`], but does not take a separate context
+    /// value. It mirrors [`mongodb::action::StartTransaction::and_run2`].
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// # use khan::{DatabaseExt, Mongo};
+    /// # #[path = "test_support.rs"] mod test_support;
+    /// # use test_support::{RUNTIME, mongo};
+    /// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
+    /// let output = mongo.run_transaction2(async |trx| {
+    ///     assert!(trx.db().name().starts_with("khan_test_"));
+    ///     Ok(46)
+    /// }).await?;
+    ///
+    /// assert_eq!(output, 46);
+    /// # Ok(())
+    /// # }
+    /// # RUNTIME.block_on(run(mongo())).unwrap();
+    /// ```
+    fn run_transaction2<'a, R, F>(&'a self, callback: F) -> LocalBoxFuture<'a, Result<R>>
+    where
+        R: 'a,
+        F: for<'b> AsyncFnMut((&'b Database, &'b mut ClientSession)) -> Result<R> + Send + 'a;
+}
+
+impl DatabaseExt for Database {
+    fn run_transaction<'a, R, C, F>(&'a self, context: C, callback: F) -> BoxFuture<'a, Result<R>>
+    where
+        R: Send + 'a,
+        C: Send + 'a,
+        F: for<'b> FnMut(
+                (&'b Database, &'b mut ClientSession),
+                &'b mut C,
+            ) -> BoxFuture<'b, Result<R>>
+            + Send
+            + 'a,
+    {
+        let db = self.clone();
+
+        async move {
+            let mut session = db.client().start_session().await?;
+            session
+                .start_transaction()
+                .and_run(
+                    (db, context, callback),
+                    |session, (db, context, callback)| {
+                        async move {
+                            let output = callback((db, session), context).await?;
+                            Ok(output)
+                        }
+                        .boxed()
+                    },
+                )
+                .await
         }
+        .boxed()
+    }
+
+    fn run_transaction2<'a, R, F>(&'a self, mut callback: F) -> LocalBoxFuture<'a, Result<R>>
+    where
+        R: 'a,
+        F: for<'b> AsyncFnMut((&'b Database, &'b mut ClientSession)) -> Result<R> + Send + 'a,
+    {
+        let db = self.clone();
+
+        async move {
+            let mut session = db.client().start_session().await?;
+            session
+                .start_transaction()
+                .and_run2(async |session| callback((&db, session)).await)
+                .await
+        }
+        .boxed_local()
     }
 }
 
-impl<'a> From<(&'a Database, &'a mut ClientSession)> for Transaction<'a> {
-    fn from(value: (&'a Database, &'a mut ClientSession)) -> Self {
-        Self::new(value.0, value.1)
+/// A `MongoDB` database context, optionally paired with a transaction session.
+///
+/// Khan operations accept any `Send` implementor of this trait. Use [`Database`] or `&Database` for normal
+/// operations, or `(&Database, &mut ClientSession)` when working with a raw driver session.
+pub trait Mongo: Send {
+    /// Returns the underlying `MongoDB` database.
+    fn db(&self) -> &Database;
+
+    /// Returns the active transactional session, if one is present.
+    fn session(&mut self) -> Option<&mut ClientSession> {
+        None
     }
 }
 
-impl<'a> From<Transaction<'a>> for Mongo<'a> {
-    fn from(value: Transaction<'a>) -> Self {
-        Mongo {
-            db: value.db,
-            session: Some(value.session),
-        }
+impl Mongo for Database {
+    fn db(&self) -> &Database {
+        self
+    }
+}
+
+impl Mongo for &Database {
+    fn db(&self) -> &Database {
+        self
+    }
+}
+
+impl Mongo for (&Database, &mut ClientSession) {
+    fn db(&self) -> &Database {
+        self.0
+    }
+
+    fn session(&mut self) -> Option<&mut ClientSession> {
+        Some(&mut *self.1)
+    }
+}
+
+impl<T: Mongo + ?Sized> Mongo for &mut T {
+    fn db(&self) -> &Database {
+        (**self).db()
+    }
+
+    fn session(&mut self) -> Option<&mut ClientSession> {
+        (**self).session()
+    }
+}
+
+/// A `MongoDB` database context with an active transaction session.
+///
+/// Locking APIs require this stronger trait instead of plain [`Mongo`] so they cannot be called outside a
+/// transaction by accident.
+pub trait Transaction: Mongo {
+    /// Returns the active transaction session.
+    fn transaction_session(&mut self) -> &mut ClientSession;
+}
+
+impl Transaction for (&Database, &mut ClientSession) {
+    fn transaction_session(&mut self) -> &mut ClientSession {
+        &mut *self.1
+    }
+}
+
+impl<T: Transaction + ?Sized> Transaction for &mut T {
+    fn transaction_session(&mut self) -> &mut ClientSession {
+        (**self).transaction_session()
     }
 }
 
@@ -867,7 +981,7 @@ macro_rules! with_session {
 /// - `UntypedFilter::new(...)` for raw BSON-based filters.
 pub trait Filter<E>: Send {
     /// Converts the filter into a MongoDB-compatible BSON document.
-    fn to_document(&self) -> Document;
+    fn to_document(&self) -> Result<Document>;
 }
 
 /// A simple filter that matches a document by its `id` field.
@@ -882,8 +996,8 @@ pub fn by_id<E: Entity>(id: E::Id) -> FilterById<E> {
 }
 
 impl<E: Entity> Filter<E> for FilterById<E> {
-    fn to_document(&self) -> Document {
-        doc! { "_id": bson::to_bson(&self.0).unwrap() }
+    fn to_document(&self) -> Result<Document> {
+        Ok(doc! { "_id": bson::to_bson(&self.0).map_err(mongodb::error::Error::custom)? })
     }
 }
 
@@ -902,8 +1016,8 @@ impl<E: Send> UntypedFilter<E> {
 }
 
 impl<E: Send> Filter<E> for UntypedFilter<E> {
-    fn to_document(&self) -> Document {
-        self.0.clone()
+    fn to_document(&self) -> Result<Document> {
+        Ok(self.0.clone())
     }
 }
 
@@ -921,8 +1035,9 @@ impl<E: Send> Filter<E> for UntypedFilter<E> {
 /// let field = Field::Set(FilterOperator::Gt(&10));
 ///
 /// if let Field::Set(operator) = field {
-///     assert_eq!(operator.to_document(), doc! { "$gt": 10 });
+///     assert_eq!(operator.to_document()?, doc! { "$gt": 10 });
 /// }
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// This constructs a typed filter that translates to `{ "field": { "$gt": 10 } }`.
@@ -941,23 +1056,23 @@ pub enum FilterOperator<'a, T: Serialize + ?Sized> {
 
 impl<T: Serialize + ?Sized> FilterOperator<'_, T> {
     /// Converts the filter operator into its corresponding `MongoDB` BSON document.
-    pub fn to_document(&self) -> Document {
-        fn to_bson<T: Serialize>(val: &T) -> Bson {
-            bson::to_bson(val).unwrap()
+    pub fn to_document(&self) -> Result<Document> {
+        fn to_bson<T: Serialize>(val: &T) -> Result<Bson> {
+            bson::to_bson(val).map_err(mongodb::error::Error::custom)
         }
 
         let (operator, bson) = match self {
-            Self::Eq(val) => ("$eq", to_bson(val)),
-            Self::Ne(val) => ("$ne", to_bson(val)),
-            Self::Gt(val) => ("$gt", to_bson(val)),
-            Self::Gte(val) => ("$gte", to_bson(val)),
-            Self::Lt(val) => ("$lt", to_bson(val)),
-            Self::Lte(val) => ("$lte", to_bson(val)),
-            Self::In(vals) => ("$in", to_bson(vals)),
-            Self::Nin(vals) => ("$nin", to_bson(vals)),
+            Self::Eq(val) => ("$eq", to_bson(val)?),
+            Self::Ne(val) => ("$ne", to_bson(val)?),
+            Self::Gt(val) => ("$gt", to_bson(val)?),
+            Self::Gte(val) => ("$gte", to_bson(val)?),
+            Self::Lt(val) => ("$lt", to_bson(val)?),
+            Self::Lte(val) => ("$lte", to_bson(val)?),
+            Self::In(vals) => ("$in", to_bson(vals)?),
+            Self::Nin(vals) => ("$nin", to_bson(vals)?),
         };
 
-        doc! { operator: bson }
+        Ok(doc! { operator: bson })
     }
 }
 
@@ -971,7 +1086,7 @@ impl<T: Serialize + ?Sized> FilterOperator<'_, T> {
 /// - `UntypedUpdate::new(...)` for raw BSON updates.
 pub trait Update<E>: Send {
     /// Converts the update into a BSON document.
-    fn to_document(&self) -> Document;
+    fn to_document(&self) -> Result<Document>;
 }
 
 /// A raw BSON update for an entity, bypassing Khan’s typed update system.
@@ -989,8 +1104,8 @@ impl<E> UntypedUpdate<E> {
 }
 
 impl<E: Send> Update<E> for UntypedUpdate<E> {
-    fn to_document(&self) -> Document {
-        self.0.clone()
+    fn to_document(&self) -> Result<Document> {
+        Ok(self.0.clone())
     }
 }
 
@@ -1012,7 +1127,7 @@ pub trait UpdateApply<S> {
 /// (e.g. `$pop`, `$push`, `$inc`) and also reflect the same change on the local struct.
 ///
 /// Typically used with the [`patch`](SelectableWithId::patch) and
-/// [`locking_patch`](SelectableWithId::locking_patch) methods when typed updates are not sufficient.
+/// [`patch_and_fence`](SelectableWithId::patch_and_fence) methods when typed updates are not sufficient.
 #[derive(Debug)]
 pub struct UntypedUpdateApply<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send>(
     Document,
@@ -1031,8 +1146,8 @@ impl<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send> UntypedUpdateApply<E, S,
 }
 
 impl<E: Entity, S: Selectable<E>, F: Fn(&mut S) + Send> Update<E> for UntypedUpdateApply<E, S, F> {
-    fn to_document(&self) -> Document {
-        self.0.clone()
+    fn to_document(&self) -> Result<Document> {
+        Ok(self.0.clone())
     }
 }
 
@@ -1082,38 +1197,39 @@ impl<T> Field<T> {
     }
 }
 
-/// A type-level marker indicating that a document is locked for the current transaction.
+/// A type-level marker indicating that a document has been fenced in the current transaction.
 ///
-/// This wrapper is returned by locking methods (e.g. `find_one_and_lock`, `locking_insert`) to guarantee that
-/// the wrapped value cannot be modified or deleted concurrently.
+/// A fence is not a mutex or SQL-style row lock. It means the transaction has written the referenced document
+/// or inserted it, so a conflicting concurrent write/delete detected by `MongoDB` will prevent this
+/// transaction from committing successfully.
 ///
-/// It can be passed to any method that requires a locked input.
+/// It can be passed to any method that requires a fenced input.
 ///
-/// `Lock<T>` implements `Deref` so it behaves like the inner value in most cases.
+/// `Fence<T>` implements `Deref` so it behaves like the inner value in most cases.
 #[derive(Debug)]
-pub struct Lock<T>(T);
+pub struct Fence<T>(T);
 
-impl<T> Lock<T> {
-    /// Creates a new `Lock<T>`. This should only be used if you're certain the value is already locked
-    /// (i.e. modified within the current transaction).
-    pub fn new_unchecked(locked: T) -> Self {
-        Self(locked)
+impl<T> Fence<T> {
+    /// Creates a new `Fence<T>`. This should only be used if you're certain the value has already been
+    /// written or inserted within the current transaction.
+    pub fn new_unchecked(fenced: T) -> Self {
+        Self(fenced)
     }
 
-    /// Consumes the `Lock` and returns the underlying value.
+    /// Consumes the `Fence` and returns the underlying value.
     pub fn into_inner(self) -> T {
         self.0
     }
 }
 
-impl<E: Entity> Lock<E> {
-    /// Returns a `Lock` containing just the entity’s ID, preserving the locking guarantee at the ID level.
-    pub fn locked_id(&self) -> Lock<E::Id> {
-        Lock(self.0.id())
+impl<E: Entity> Fence<E> {
+    /// Returns a `Fence` containing just the entity’s ID, preserving the fencing marker at the ID level.
+    pub fn fenced_id(&self) -> Fence<E::Id> {
+        Fence(self.0.id())
     }
 }
 
-impl<T> std::ops::Deref for Lock<T> {
+impl<T> std::ops::Deref for Fence<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -1121,7 +1237,7 @@ impl<T> std::ops::Deref for Lock<T> {
     }
 }
 
-impl<T> std::ops::DerefMut for Lock<T> {
+impl<T> std::ops::DerefMut for Fence<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
@@ -1129,9 +1245,21 @@ impl<T> std::ops::DerefMut for Lock<T> {
 
 /// A wrapper around `mongodb::results::UpdateResult` that represents the result of an update operation on a
 /// `MongoDB` collection.
+#[repr(transparent)]
+#[derive(Debug)]
 pub struct UpdateResult(pub mongodb::results::UpdateResult);
 
 impl UpdateResult {
+    /// Returns the wrapped `MongoDB` driver result.
+    pub fn raw(&self) -> &mongodb::results::UpdateResult {
+        &self.0
+    }
+
+    /// Consumes this wrapper and returns the wrapped `MongoDB` driver result.
+    pub fn into_inner(self) -> mongodb::results::UpdateResult {
+        self.0
+    }
+
     /// Returns the number of documents that matched the update filter.
     pub fn matched_count(&self) -> u64 {
         self.0.matched_count
@@ -1153,11 +1281,31 @@ impl UpdateResult {
     }
 }
 
+impl std::ops::Deref for UpdateResult {
+    type Target = mongodb::results::UpdateResult;
+
+    fn deref(&self) -> &Self::Target {
+        self.raw()
+    }
+}
+
 /// A wrapper around `mongodb::results::DeleteResult`, representing
 /// the outcome of a delete operation.
+#[repr(transparent)]
+#[derive(Debug)]
 pub struct DeleteResult(pub mongodb::results::DeleteResult);
 
 impl DeleteResult {
+    /// Returns the wrapped `MongoDB` driver result.
+    pub fn raw(&self) -> &mongodb::results::DeleteResult {
+        &self.0
+    }
+
+    /// Consumes this wrapper and returns the wrapped `MongoDB` driver result.
+    pub fn into_inner(self) -> mongodb::results::DeleteResult {
+        self.0
+    }
+
     /// Returns the number of documents that were deleted.
     pub fn deleted_count(&self) -> u64 {
         self.0.deleted_count
@@ -1169,16 +1317,24 @@ impl DeleteResult {
     }
 }
 
-fn merge_lock_into_update<E>(update: &impl Update<E>) -> Result<UntypedUpdate<E>> {
-    let mut document = update.to_document();
+impl std::ops::Deref for DeleteResult {
+    type Target = mongodb::results::DeleteResult;
 
-    let set_operator = document
-        .entry("$set".into())
+    fn deref(&self) -> &Self::Target {
+        self.raw()
+    }
+}
+
+fn merge_fence_into_update<E>(update: &impl Update<E>) -> Result<UntypedUpdate<E>> {
+    let mut document = update.to_document()?;
+
+    let inc_operator = document
+        .entry("$inc".into())
         .or_insert_with(|| doc! {}.into())
         .as_document_mut()
-        .ok_or_else(|| mongodb::error::Error::custom("`$set` operator value must be an object"))?;
+        .ok_or_else(|| mongodb::error::Error::custom("`$inc` operator value must be an object"))?;
 
-    set_operator.insert("_lock", doc! { "seed": ObjectId::new() });
+    inc_operator.insert("__fence", 1);
 
     Ok(UntypedUpdate::new(document))
 }

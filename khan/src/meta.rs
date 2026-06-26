@@ -149,7 +149,7 @@ pub fn entity_metadata() -> impl Iterator<Item = &'static EntityMetadata> {
 ///
 /// Intended for development or simple production use. For more complex
 /// scenarios (e.g. index migrations), use [`entity_metadata`] to implement a custom workflow.
-pub async fn enforce_indexes(mongo: Mongo<'_>) -> Result<()> {
+pub async fn enforce_indexes(mongo: impl Mongo) -> Result<()> {
     for metadata in entity_metadata() {
         let indexes = metadata.indexes();
 
@@ -158,7 +158,7 @@ pub async fn enforce_indexes(mongo: Mongo<'_>) -> Result<()> {
         }
 
         mongo
-            .db
+            .db()
             .collection::<Document>(metadata.collection_name())
             .create_indexes(indexes)
             .await?;
@@ -179,9 +179,9 @@ pub async fn enforce_indexes(mongo: Mongo<'_>) -> Result<()> {
 /// ### Panics
 /// This function panics if `JsonSchema`s of any of the entities contain keywords or types unsupported by
 /// `MongoDB`, such as `$ref` or `integer`.
-pub async fn enforce_validation(mongo: Mongo<'_>) -> Result<()> {
+pub async fn enforce_validation(mongo: impl Mongo) -> Result<()> {
     let existing_collections = mongo
-        .db
+        .db()
         .list_collection_names()
         .await?
         .into_iter()
@@ -214,7 +214,7 @@ pub async fn enforce_validation(mongo: Mongo<'_>) -> Result<()> {
         if let Some(validator) = validator {
             if existing_collections.contains(metadata.collection_name()) {
                 mongo
-                    .db
+                    .db()
                     .run_command(doc! {
                         "collMod": metadata.collection_name(),
                         "validator": validator,
@@ -222,7 +222,7 @@ pub async fn enforce_validation(mongo: Mongo<'_>) -> Result<()> {
                     .await?;
             } else {
                 mongo
-                    .db
+                    .db()
                     .create_collection(metadata.collection_name())
                     .validator(validator)
                     .await?;

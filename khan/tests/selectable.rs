@@ -1,4 +1,4 @@
-use khan::{Entity, Selectable, SelectableWithId, by_id};
+use khan::{Entity, FindOptions, Selectable, SelectableWithId, by_id};
 use khan_macros::async_test;
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
@@ -182,10 +182,13 @@ mod find_with_opts {
 
         User::insert_many(get_mongo(), &users).await.unwrap();
 
-        let found_users =
-            User::find_with_opts(get_mongo(), user::filter! { name: &name }, None, None, None)
-                .await
-                .unwrap();
+        let found_users = User::find_with_opts(
+            get_mongo(),
+            user::filter! { name: &name },
+            FindOptions::new(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(found_users.len(), users.len());
         assert!(
@@ -213,9 +216,7 @@ mod find_with_opts {
         let found_profiles = user::Profile::find_with_opts(
             get_mongo(),
             user::filter! { name: &name },
-            None,
-            None,
-            None,
+            FindOptions::new(),
         )
         .await
         .unwrap();
@@ -255,13 +256,10 @@ mod find_with_opts {
         let found_users = User::find_with_opts(
             get_mongo(),
             user::filter! { name: &name },
-            Some(1),
-            Some(3),
-            Some({
-                let mut order_by = indexmap::IndexMap::new();
-                order_by.insert(user::Fields::Index, khan::Order::Asc);
-                order_by
-            }),
+            FindOptions::new()
+                .skip(1)
+                .limit(3)
+                .sort_by(user::Fields::Index, khan::Order::Asc),
         )
         .await
         .unwrap();
@@ -297,13 +295,10 @@ mod find_with_opts {
         let found_profiles = user::Profile::find_with_opts(
             get_mongo(),
             user::filter! { name: &name },
-            Some(1),
-            Some(3),
-            Some({
-                let mut order_by = indexmap::IndexMap::new();
-                order_by.insert(user::Fields::Index, khan::Order::Asc);
-                order_by
-            }),
+            FindOptions::new()
+                .skip(1)
+                .limit(3)
+                .sort_by(user::Fields::Index, khan::Order::Asc),
         )
         .await
         .unwrap();

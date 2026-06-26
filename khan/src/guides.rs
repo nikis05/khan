@@ -49,7 +49,7 @@
 /// # #[path = "test_support.rs"] mod test_support;
 /// # use test_support::{RUNTIME, User, mongo};
 /// # use mongodb::bson::oid::ObjectId;
-/// # async fn run(mut mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
+/// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
 /// let user = User {
 ///   id: ObjectId::new(),
 /// #   email: test_support::unique("kit@example.com"),
@@ -63,16 +63,16 @@
 ///
 /// // Equivalent to:
 /// // db.user.insertOne({ _id: user.id, name: "Kit Isaev", password: "somepassword" })
-/// user.insert(mongo.rb()).await?;
+/// user.insert(mongo).await?;
 ///
 /// // Equivalent to:
 /// // db.user.findOne({ _id: user.id })
-/// let user = User::find_one(mongo.rb(), by_id(user_id)).await?.unwrap();
+/// let user = User::find_one(mongo, by_id(user_id)).await?.unwrap();
 /// assert_eq!(user.id, user_id);
 ///
 /// // Equivalent to:
 /// // db.user.deleteOne({ _id: user.id })
-/// let result = user.remove(mongo.rb()).await?;
+/// let result = user.remove(mongo).await?;
 /// assert!(result.deleted());
 ///
 /// # Ok(())
@@ -80,48 +80,45 @@
 /// # RUNTIME.block_on(run(mongo())).unwrap();
 /// ```
 ///
-/// ## Creating `Mongo`
+/// ## Supplying `Mongo`
 ///
-/// [`Mongo`](crate::Mongo) is a lightweight wrapper around a reference to
-/// [`mongodb::Database`](mongodb::Database), optionally paired with a mutable reference to
-/// a [`mongodb::ClientSession`](mongodb::ClientSession) for use in
-/// [transactions](super::transactions_and_locking).
+/// [`Mongo`](crate::Mongo) is the trait Khan uses for database access. It is
+/// implemented for [`&Database`](mongodb::Database), optionally paired with a
+/// mutable reference to a [`mongodb::ClientSession`](mongodb::ClientSession) for use in
+/// [transactions](super::transactions_and_fencing).
 ///
-/// It is accepted by all Khan operations and can be created from a
+/// It is accepted by all Khan operations and can be supplied from a
 /// [`Database`](mongodb::Database) instance:
 ///
 /// ```ignore
 /// let client = Client::with_uri_str("mongodb://example.com").await?;
 /// let db = client.database("mydb");
-/// let mongo: Mongo = db.into();
-/// user.insert(mongo).await?;
+/// user.insert(&db).await?;
 /// ```
 ///
 /// For detailed instructions on establishing a connection and creating a
 /// [`Database`](mongodb::Database) instance, please refer to the
 /// [`mongodb` documentation](mongodb::Client).
 ///
-/// Methods in `khan` take `Mongo` by value. To reuse the same instance multiple times,
-/// call [`.rb()`](crate::Mongo::rb) to reborrow it:
+/// Because [`&Database`](mongodb::Database) is reusable, normal database operations can
+/// pass the same reference repeatedly:
 ///
 /// ```
-/// # use khan::{Entity, Mongo, Selectable, SelectableWithId};
+/// # use khan::{Entity, Selectable, SelectableWithId};
 /// # #[path = "test_support.rs"] mod test_support;
 /// # use test_support::{RUNTIME, User, mongo, user};
-/// # async fn run(mut setup_mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
-/// # let db = setup_mongo.db.clone();
+/// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
 /// # let email = test_support::unique("kit@example.com");
 /// # let mut seed = test_support::user();
 /// # seed.email = email.clone();
-/// # seed.insert(setup_mongo.rb()).await?;
-/// let mut mongo = Mongo::new(&db);
+/// # seed.insert(mongo).await?;
 ///
-/// let user = User::find_one(mongo.rb(), user::filter! {
+/// let user = User::find_one(mongo, user::filter! {
 ///     email: &email
 /// }).await?;
 ///
 /// if let Some(user) = user {
-///     let result = user.remove(mongo.rb()).await?;
+///     let result = user.remove(mongo).await?;
 ///     assert!(result.deleted());
 /// }
 /// # Ok(())
@@ -139,8 +136,8 @@
 /// | `Entity::exists`                  | Returns true if at least one entity matches the filter.                          | `User::exists(mongo, user::filter! { name: "Kit" }).await?;`                                            | `db.collection('user').count({ name: { $eq: "Kit" } });`                                      |
 /// | `Selectable::find`                | Finds entities based on a filter.                                                | `User::find(mongo, user::filter! { name: "Kit" }).await?;`                                              | `db.collection('user').find({ name: { $eq: "Kit" } });`                                       |  
 /// | `Selectable::find_one`            | Finds a single entity based on a filter.                                         | `User::find_one(mongo, by_id(id)).await?;`                                                              | `db.collection('user').findOne({ _id: { $eq: id } });`                                        |
-/// | `Selectable::find_with_opts`      | Finds entities with options for skip, limit, and sorting.                        | `User::find_with_opts(user::filter! { name: "Kit" }), by_id(id), Some(10), Some(20), None).await?;`     | `db.collection('user').find({ name: { $eq: "Kit" } }).skip(10).limit(20);`                    |  
-/// | `Selectable::find_one_and_update` | Finds and updates a single entity based on a filter.                             | `User::find_one_and_update(mongo, by_id(id), user::update! { name: "Kit".into() }).await?;`             | `db.collection('user').findOneAndUpdate({ _id: id }, { $set: { name: "Kit" } });`             |
+/// | `Selectable::find_with_opts`      | Finds entities with options for skip, limit, and sorting.                        | `User::find_with_opts(mongo, user::filter! { name: "Kit" }, FindOptions::new().skip(10).limit(20)).await?;` | `db.collection('user').find({ name: { $eq: "Kit" } }).skip(10).limit(20);`                 |  
+/// | `Selectable::find_one_and_update` | Finds and updates a single entity, returning the pre-update document.            | `User::find_one_and_update(mongo, by_id(id), user::update! { name: "Kit".into() }).await?;`             | `db.collection('user').findOneAndUpdate({ _id: id }, { $set: { name: "Kit" } });`             |
 /// | `Entity::update`                  | Updates multiple documents based on a filter.                                    | `User::update(mongo, user::filter! { name: "Kit" }, user::update! { password: "pass".into() }).await?;` | `db.collection('user').updateMany({ name: { $eq: "Kit" } }, { $set: { password: "pass" } });` |  
 /// | `Entity::update_one`              | Updates a single document based on a filter.                                     | `Entity::update_one(mongo, by_id(id), user::update! { password: "pass".into() }).await?;`               | `db.collection('user').updateOne({ _id: { $eq: id } }, { $set: { password: "pass" } });`      |
 /// | `SelectableWithId::patch`         | Applies a patch to an existing document based on its id, and updates the struct. | `user.patch(mongo, user::update! { password: "pass".into() }).await?;`                                  | `db.collection('user').updateOne({ _id: { $eq: user.id } }, { $set: { password: "pass" } });` |
@@ -247,7 +244,8 @@ mod getting_started {}
 ///     ..Default::default()
 /// };
 ///
-/// assert_eq!(filter.to_document(), doc! { "name": { "$eq": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "Kit" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// Equivalent `MongoDB` query:
@@ -266,7 +264,8 @@ mod getting_started {}
 ///     ..Default::default()
 /// };
 ///
-/// assert_eq!(update.to_document(), doc! { "$set": { "name": "K.I." } });
+/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "K.I." } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// Equivalent `MongoDB` update:
@@ -289,7 +288,8 @@ mod getting_started {}
 ///     name: "Kit"
 /// };
 ///
-/// assert_eq!(filter.to_document(), doc! { "name": { "$eq": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "Kit" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// Expands to:
@@ -303,7 +303,8 @@ mod getting_started {}
 ///     ..Default::default()
 /// };
 ///
-/// assert_eq!(filter.to_document(), doc! { "name": { "$eq": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "Kit" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// By default, the `filter!` macro uses the `$eq` comparison operator. Other comparison
@@ -319,7 +320,8 @@ mod getting_started {}
 ///     name: Ne("Kit")
 /// };
 ///
-/// assert_eq!(filter.to_document(), doc! { "name": { "$ne": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$ne": "Kit" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// Expands to:
@@ -333,7 +335,8 @@ mod getting_started {}
 ///     ..Default::default()
 /// };
 ///
-/// assert_eq!(filter.to_document(), doc! { "name": { "$ne": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$ne": "Kit" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// And for updates:
@@ -346,7 +349,8 @@ mod getting_started {}
 ///     name: "Kit".to_string()
 /// };
 ///
-/// assert_eq!(update.to_document(), doc! { "$set": { "name": "Kit" } });
+/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "Kit" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// Expands to:
@@ -360,7 +364,8 @@ mod getting_started {}
 ///     ..Default::default()
 /// };
 ///
-/// assert_eq!(update.to_document(), doc! { "$set": { "name": "Kit" } });
+/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "Kit" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// ## Untyped filters and updates
@@ -384,7 +389,8 @@ mod getting_started {}
 ///     }
 /// });
 ///
-/// assert_eq!(filter.to_document(), doc! { "name": { "$regex": "^Kit$" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$regex": "^Kit$" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// Similarly, you can use `UntypedUpdate` for expressing complex update operations
@@ -407,9 +413,10 @@ mod getting_started {}
 /// });
 ///
 /// assert_eq!(
-///     update.to_document(),
+///     update.to_document()?,
 ///     bson::doc! { "$push": { "comments": { "$each": [comment], "$slice": -10 } } }
 /// );
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// ### `Fields` enum
@@ -430,7 +437,8 @@ mod getting_started {}
 ///     "name": { "$regex": "^Kit$" }
 /// });
 ///
-/// assert_eq!(filter.to_document(), bson::doc! { "name": { "$regex": "^Kit$" } });
+/// assert_eq!(filter.to_document()?, bson::doc! { "name": { "$regex": "^Kit$" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// You can write:
@@ -444,7 +452,8 @@ mod getting_started {}
 ///     user::Fields::Name: { "$regex": "^Kit$" }
 /// });
 ///
-/// assert_eq!(filter.to_document(), bson::doc! { "name": { "$regex": "^Kit$" } });
+/// assert_eq!(filter.to_document()?, bson::doc! { "name": { "$regex": "^Kit$" } });
+/// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// The enum also honors `#[serde(rename = "...")]`, so renamed fields will be mapped to
@@ -472,10 +481,10 @@ mod getting_started {}
 /// # use khan::mongodb::bson::doc;
 /// # #[path = "test_support.rs"] mod test_support;
 /// # use test_support::{Post, RUNTIME, mongo};
-/// # async fn run(mut mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
+/// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
 /// # let mut post = test_support::post();
-/// # post.insert(mongo.rb()).await?;
-/// let result = post.patch(mongo.rb(), UntypedUpdateApply::new(
+/// # post.insert(mongo).await?;
+/// let result = post.patch(mongo, UntypedUpdateApply::new(
 ///     doc! { "$pop": { "comments": 1 } },
 ///     |p: &mut Post| { p.comments.pop(); },
 /// )).await?;
@@ -556,16 +565,16 @@ mod filters_and_updates {}
 /// # use khan::{Entity, Selectable, SelectableWithId};
 /// # #[path = "test_support.rs"] mod test_support;
 /// # use test_support::{RUNTIME, mongo, user};
-/// # async fn run(mut mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
+/// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
 /// # let name = test_support::unique("Kit");
 /// # let mut seed = test_support::user();
 /// # seed.name = name.clone();
-/// # seed.insert(mongo.rb()).await?;
-/// let mut profile = user::PublicProfile::find_one(mongo.rb(), user::filter! {
+/// # seed.insert(mongo).await?;
+/// let mut profile = user::PublicProfile::find_one(mongo, user::filter! {
 ///     name: &name
 /// }).await?.unwrap();
 ///
-/// let result = profile.patch(mongo.rb(), user::update! { name: "Tom".into() }).await?;
+/// let result = profile.patch(mongo, user::update! { name: "Tom".into() }).await?;
 /// assert!(result.matched());
 /// assert_eq!(&profile.name, "Tom");
 /// # Ok(())
@@ -575,7 +584,7 @@ mod filters_and_updates {}
 ///
 mod projections {}
 
-/// # Transactions and locking
+/// # Transactions and fencing
 ///
 /// All methods on [`Entity`](crate::Entity), [`Selectable`](crate::Selectable), and
 /// [`SelectableWithId`](crate::SelectableWithId) can be run in the context of a
@@ -590,29 +599,34 @@ mod projections {}
 /// let mut session = client.start_session().await?;
 ///
 /// session.start_transaction().and_run(&db, |session| async move {
-///     let mut mongo = (db, session).into();
+///     let mut mongo = (db, session);
 ///
-///     let user = User::find_one(mongo.rb(), user::filter! {
+///     let user = User::find_one(&mut mongo, user::filter! {
 ///         email: "kit@example.com"
 ///     }).await?;
 ///
 ///     if let Some(user) = user {
-///         user.remove(mongo.rb()).await?;
+///         user.remove(&mut mongo).await?;
 ///     }
 ///
 ///     Ok(())
 /// }).await?;
 /// ```
 ///
-/// ## Locking
+/// ## Fencing
 ///
-/// Sometimes you want to make sure that a document read inside a transaction
-/// isn’t modified by another operation before the transaction commits.
+/// **Important:** a fence is not a mutex or SQL-style row lock. It works by performing a write
+/// to the referenced document inside the transaction so that `MongoDB` can detect conflicting
+/// concurrent writes. It does not stop other operations from running, and it does not provide
+/// predicate or range locking.
 ///
-/// For example, imagine you're inserting a `Comment` that references an existing `Post`
-/// by its ID. You check that the referenced post exists in the beginning of the
-/// transaction, and want to make sure that it is not deleted before the transaction
-/// commits:
+/// Sometimes you want to make sure that a transaction does not commit based on a stale reference.
+/// For example, imagine you're inserting a `Comment` that references an existing `Post` by its ID.
+/// You check that the referenced post exists at the beginning of the transaction, and want to make
+/// sure the comment does not commit if that post is concurrently deleted or meaningfully modified:
+///
+/// The following code only checks existence. It does not write to `Post`, so `MongoDB` has no
+/// document-level write conflict to detect for the reference:
 ///
 /// ```ignore
 /// session
@@ -620,20 +634,20 @@ mod projections {}
 ///     .and_run(
 ///         (&db, post_id, text),
 ///         |session, (db, post_id, text)| async move {
-///             let mut mongo = (db, session).into();
+///             let mut mongo = (db, session);
 ///
-///             if !Post::exists(mongo.rb(), by_id(post_id)).await? {
+///             if !Post::exists(&mut mongo, by_id(post_id)).await? {
 ///                 return Err(Error::custom("Post is not found"));
 ///             }
 ///
-///             // Post may be deleted betweeen these two operations,
+///             // Post may be deleted between these two operations,
 ///             // rendering a reference by id invalid.
 ///             Comment {
 ///                 id: ObjectId::new(),
 ///                 post_id,
 ///                 text,
 ///             }
-///             .insert(mongo.rb())
+///             .insert(&mut mongo)
 ///             .await?;
 ///
 ///             Ok(())
@@ -643,8 +657,8 @@ mod projections {}
 /// ```
 ///
 /// If the transaction already performs a meaningful update to the document (for example,
-/// if adding a comment increments the `commentsCount` field on `Post`), no additional steps
-/// are needed — the update itself will act as a lock.
+/// if adding a comment increments the `commentsCount` field on `Post`), no additional fence write
+/// is needed. The update itself is the fence:
 ///
 /// ```ignore
 /// session
@@ -652,11 +666,11 @@ mod projections {}
 ///     .and_run(
 ///         (&db, post_id, text),
 ///         |session, (db, post_id, text)| async move {
-///             let mut mongo = (db, session).into();
+///             let mut mongo = (db, session);
 ///
-///             // This update acts as a lock by modifying the document
+///             // This update acts as a fence by modifying the document.
 ///             let result = Post::update_one(
-///                 mongo.rb(),
+///                 &mut mongo,
 ///                 by_id(post_id),
 ///                 UntypedUpdate::new(doc! {
 ///                     "$inc": { "commentsCount": 1 }
@@ -668,14 +682,14 @@ mod projections {}
 ///                 return Err(Error::custom("Post is not found"));
 ///             }
 ///
-///             // Safe to insert the comment now — if the post were deleted concurrently,
-///             // the transaction would fail due to a write conflict on the post.
+///             // If the post is concurrently modified or deleted by a conflicting writer,
+///             // this transaction will not commit successfully; it will abort or retry.
 ///             Comment {
 ///                 id: ObjectId::new(),
 ///                 post_id,
 ///                 text,
 ///             }
-///             .insert(mongo.rb())
+///             .insert(&mut mongo)
 ///             .await?;
 ///
 ///             Ok(())
@@ -684,8 +698,8 @@ mod projections {}
 ///     .await?;
 /// ```
 ///
-/// However, if no meaningful changes are required, you can perform a *dummy update*
-/// by writing to an unused utility field, such as `_lock.seed`, with a random value:
+/// However, if no meaningful changes are required, you can perform a small fence write by
+/// incrementing Khan's internal `__fence` field:
 ///
 /// ```ignore
 /// session
@@ -693,15 +707,15 @@ mod projections {}
 ///     .and_run(
 ///         (&db, post_id, text),
 ///         |session, (db, post_id, text)| async move {
-///             let mut mongo = (db, session).into();
+///             let mut mongo = (db, session);
 ///
-///             // We're not making any meaningful changes to the Post,
-///             // but we still want to ensure it won't be modified or deleted during the transaction.
+///             // We're not making any meaningful changes to the Post, but we still want
+///             // concurrent modifications/deletes to conflict with this transaction.
 ///             Post::update_one(
-///                 mongo.rb(),
+///                 &mut mongo,
 ///                 by_id(post_id),
 ///                 UntypedUpdate::new(doc! {
-///                     "$set": { "_lock": { "seed": ObjectId::new() } }
+///                     "$inc": { "__fence": 1 }
 ///                 }),
 ///             )
 ///             .await?;
@@ -711,7 +725,7 @@ mod projections {}
 ///                 post_id,
 ///                 text,
 ///             }
-///             .insert(mongo.rb())
+///             .insert(&mut mongo)
 ///             .await?;
 ///
 ///             Ok(())
@@ -720,16 +734,29 @@ mod projections {}
 ///     .await?;
 /// ```
 ///
-/// This locking technique works well when the entire transaction happens within a
-/// single method or scope.
+/// A fence gives the following practical guarantee: if you fence a document and then create a
+/// dependent record in the same transaction, that transaction will not commit successfully if
+/// `MongoDB` detects a concurrent conflicting write or delete to the fenced document.
+///
+/// Assumptions and non-guarantees:
+///
+/// - The guarantee relies on `MongoDB` transaction conflict detection.
+/// - The transaction closure may run multiple times because the driver may retry it.
+/// - A fence is document-scoped; it does not protect predicates, ranges, or arbitrary queries.
+/// - Read-only transactions do not establish a fence.
+/// - Writers outside Khan or outside transactions are best-effort from Khan's point of view.
+/// - If collection validation is strict, allow Khan's scalar `__fence` field or use a meaningful update
+///   that already fits your schema.
+///
+/// This technique works well when the entire transaction happens within a single method or scope.
 ///
 /// However, if a transaction spans multiple methods, it can become difficult to track which
-/// documents have been locked and which haven’t. This makes it easy to accidentally skip a
-/// necessary lock, leading to race conditions or inconsistent state:
+/// documents have been fenced and which haven’t. This makes it easy to accidentally skip a
+/// necessary fence, leading to race conditions or inconsistent state:
 ///
 /// ```ignore
 /// // Model code
-/// async fn create_post(trx: Transaction<'_>, text: String) -> Result<ObjectId> {
+/// async fn create_post(trx: impl Transaction, text: String) -> Result<ObjectId> {
 ///     let id = ObjectId::new();
 ///
 ///     // Insert a new post document into the database.
@@ -737,21 +764,21 @@ mod projections {}
 ///         id,
 ///         text,
 ///     }
-///     .insert(trx.into())
+///     .insert(trx)
 ///     .await?;
 ///
 ///     Ok(id)
 /// }
 ///
 /// // Model code
-/// async fn create_comment(trx: Transaction<'_>, post_id: ObjectId, text: String) -> Result<()> {
+/// async fn create_comment(trx: impl Transaction, post_id: ObjectId, text: String) -> Result<()> {
 ///     // Insert a new comment referencing the given post_id.
 ///     Comment {
 ///         id: ObjectId::new(),
 ///         post_id,
 ///         text,
 ///     }
-///     .insert(trx.into())
+///     .insert(trx)
 ///     .await?;
 ///
 ///     Ok(())
@@ -760,12 +787,14 @@ mod projections {}
 /// // Controller code
 /// async fn make_post_with_initial_comment(ctx: AppContext, post_text: String, comment_text: String) -> Result<()> {
 ///     ctx.mongo().run_transaction((post_text, comment_text), |trx, (post_text, comment_text)| async move {
+///         let mut trx = trx;
+///
 ///         // The post is created as part of this transaction...
-///         let post_id = create_post(trx.rb().into(), post_text).await?;
+///         let post_id = create_post(&mut trx, post_text).await?;
 ///
 ///         // ...and the comment referencing it is inserted within the same transaction.
-///         // This is safe: the post is guaranteed to not be deleted or modified until the transaction commits.
-///         create_comment(trx.rb().into(), post_id, comment_text).await?;
+///         // This is safe because the post was inserted in this transaction.
+///         create_comment(&mut trx, post_id, comment_text).await?;
 ///
 ///         Ok(())
 ///     }).await?;
@@ -776,10 +805,12 @@ mod projections {}
 /// // Controller code
 /// async fn make_comment(ctx: AppContext, post_id: ObjectId, text: String) -> Result<()> {
 ///     ctx.mongo().run_transaction((post_id, text), |trx, (post_id, text)| async move {
+///         let mut trx = trx;
+///
 ///         // This is NOT safe: we assume the post exists,
 ///         // but there's no guarantee it won't be deleted before the transaction commits.
 ///         // This can result in a comment pointing to a non-existent post.
-///         create_comment(trx.into(), post_id, text).await?;
+///         create_comment(&mut trx, post_id, text).await?;
 ///
 ///         Ok(())
 ///     }).await?;
@@ -788,76 +819,75 @@ mod projections {}
 /// }
 /// ```
 ///
-/// In these cases, it may be desirable encode the locking guarantee in the type system.
+/// In these cases, it may be desirable encode the fencing requirement in the type system.
 ///
-/// Khan provides a [`Lock<T>`](crate::Lock) wrapper type to express this guarantee explicitly in your method
-/// signatures. When a value is wrapped in [`Lock<T>`](crate::Lock), it means that the document has already been
-/// locked (via a dummy or real update), and it will not be modified again until the transaction completes.
+/// Khan provides a [`Fence<T>`](crate::Fence) wrapper type to express this requirement explicitly in your
+/// method signatures. When a value is wrapped in [`Fence<T>`](crate::Fence), it means that the document has
+/// already been inserted or written in the current transaction.
 ///
-/// You can then require a [`Lock<T>`](crate::Lock) as input to any method that assumes the document is
-/// protected from concurrent modification:
+/// You can then require a [`Fence<T>`](crate::Fence) as input to any method that assumes the document has
+/// been fenced:
 ///
 /// ```
-/// # use khan::{Entity, Lock};
+/// # use khan::{Entity, Fence};
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::post;
-/// let locked_post = Lock::new_unchecked(post());
-/// let locked_id = locked_post.locked_id();
+/// let fenced_post = Fence::new_unchecked(post());
+/// let fenced_id = fenced_post.fenced_id();
 ///
-/// assert_eq!(*locked_id, locked_post.id);
+/// assert_eq!(*fenced_id, fenced_post.id);
 /// ```
 ///
 /// ```ignore
 /// // Model code
 /// async fn create_post(
-///     trx: Transaction<'_>,
+///     trx: impl Transaction,
 ///     text: String,
-/// ) -> Result<Lock<ObjectId>> {
-///     // This function guarantees at the type level that the post it creates
-///     // will not be modified or deleted until the transaction is committed.
+/// ) -> Result<Fence<ObjectId>> {
+///     // This function proves at the type level that the post it creates
+///     // has been inserted in this transaction.
 ///
 ///     let id = ObjectId::new();
 ///
-///     // Insert the post while marking it as "locked" within the transaction.
-///     let post: Lock<Post> = Post {
+///     // Insert the post while marking it as fenced within the transaction.
+///     let post: Fence<Post> = Post {
 ///         id,
 ///         text,
 ///     }
-///     .locking_insert(trx.into())
+///     .insert_and_fence(trx)
 ///     .await?;
 ///
-///     // Convert the locked post into a locked ID, so we can safely pass it to other methods.
-///     let locked_id: Lock<ObjectId> = post.locked_id();
+///     // Convert the fenced post into a fenced ID, so we can pass it to other methods.
+///     let fenced_id: Fence<ObjectId> = post.fenced_id();
 ///
-///     Ok(locked_id)
+///     Ok(fenced_id)
 /// }
 ///
 /// // Model code
 /// async fn create_comment(
-///     trx: Transaction<'_>,
-///     post_id: Lock<ObjectId>, // Enforces that the referenced post is already locked
+///     trx: impl Transaction,
+///     post_id: Fence<ObjectId>, // Enforces that the referenced post is already fenced
 ///     text: String,
 /// ) -> Result<()> {
-///     // This function requires, at the type level, that the referenced post is locked.
-///     // This ensures the post can't be modified or deleted during the transaction.
+///     // This function requires, at the type level, that the referenced post has been fenced.
 ///
 ///     Comment {
 ///         id: ObjectId::new(),
 ///         post_id,
 ///         text,
 ///     }
-///     .insert(trx.into())
+///     .insert(trx)
 ///     .await?;
 ///
 ///     Ok(())
 /// }
 ///
 /// // Model code
-/// async fn reference_post(trx: Transaction<'_>, post_id: ObjectId) -> Result<Lock<ObjectId>> {
-///     // Attempts to find and lock the post by ID, returning a locked ID if successful.
+/// async fn reference_post(trx: impl Transaction, post_id: ObjectId) -> Result<Fence<ObjectId>> {
+///     // Attempts to fence the post by ID, returning a fenced ID if successful.
 ///     // If the post does not exist, returns an error.
-///     match Post::lock_by_id(trx, post_id).await? {
-///         Some(locked_id) => Ok(locked_id),
+///     match Post::fence_by_id(trx, post_id).await? {
+///         Some(fenced_id) => Ok(fenced_id),
 ///         None => Err(Error::custom("Post with this id was not found")),
 ///     }
 /// }
@@ -869,11 +899,13 @@ mod projections {}
 ///     comment_text: String,
 /// ) -> Result<()> {
 ///     ctx.mongo().run_transaction((post_text, comment_text), |trx, (post_text, comment_text)| async move {
-///         // Creates a new post - it is locked since it has just been inserted.
-///         let post_id: Lock<ObjectId> = create_post(trx.rb().into(), post_text).await?;
+///         let mut trx = trx;
 ///
-///         // Since the post is locked, we can safely insert a comment referencing it
-///         create_comment(trx.rb().into(), post_id, comment_text).await?;
+///         // Creates a new post - it is fenced since it has just been inserted.
+///         let post_id: Fence<ObjectId> = create_post(&mut trx, post_text).await?;
+///
+///         // Since the post is fenced, we can insert a comment through the fenced API.
+///         create_comment(&mut trx, post_id, comment_text).await?;
 ///
 ///         Ok(())
 ///     }).await?;
@@ -884,12 +916,14 @@ mod projections {}
 /// // Controller code
 /// async fn make_comment(ctx: AppContext, post_id: ObjectId, text: String) -> Result<()> {
 ///     ctx.mongo().run_transaction((post_id, text), |trx, (post_id, text)| async move {
-///         // Ensure that the post exists and is locked before proceeding
-///         let post_id: Lock<ObjectId> = reference_post(trx.rb().into(), post_id).await?;
+///         let mut trx = trx;
 ///
-///         // Now that the locking guarantee is enforced by the type system,
-///         // `create_comment` cannot be called unless the post is locked.
-///         create_comment(trx.into(), post_id, text).await?;
+///         // Ensure that the post exists and is fenced before proceeding.
+///         let post_id: Fence<ObjectId> = reference_post(&mut trx, post_id).await?;
+///
+///         // Now that the fencing requirement is enforced by the type system,
+///         // `create_comment` cannot be called unless the post is fenced.
+///         create_comment(&mut trx, post_id, text).await?;
 ///
 ///         Ok(())
 ///     }).await?;
@@ -897,7 +931,7 @@ mod projections {}
 ///     Ok(())
 /// }
 /// ```
-mod transactions_and_locking {}
+mod transactions_and_fencing {}
 
 /// # Patterns and Recommendations
 ///
@@ -1019,7 +1053,7 @@ mod transactions_and_locking {}
 ///             &self.0.text
 ///         }
 ///
-///         pub async fn create(mongo: Mongo<'_>, text: String) -> Result<Self> {
+///         pub async fn create(mongo: impl Mongo, text: String) -> Result<Self> {
 ///             let entity = entity::PostEntity {
 ///                 id: ObjectId::new(),
 ///                 text
@@ -1075,7 +1109,7 @@ mod transactions_and_locking {}
 ///     /// Adds a new session to the user.
 ///     /// This operation uses a raw `$push` update on a nested array field, which is not supported by Khan's
 ///     /// typed update API — so we use `UntypedUpdateApply`.
-///     pub async fn add_session(&mut self, mongo: Mongo<'_>, session: Session) -> Result<()> {
+///     pub async fn add_session(&mut self, mongo: impl Mongo, session: Session) -> Result<()> {
 ///         self.patch(
 ///             mongo,
 ///             UntypedUpdateApply::new(

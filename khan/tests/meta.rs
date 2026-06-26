@@ -317,7 +317,6 @@ mod enforce_indexes {
     async fn new_collection() {
         non_concurrently(async {
             get_mongo()
-                .db
                 .collection::<Document>("user_with_enforced_indexes")
                 .drop()
                 .await
@@ -328,7 +327,6 @@ mod enforce_indexes {
         .await;
 
         let indexes = get_mongo()
-            .db
             .collection::<Document>("user_with_enforced_indexes")
             .list_indexes()
             .await
@@ -379,14 +377,12 @@ mod enforce_indexes {
     async fn existing_collection() {
         non_concurrently(async {
             get_mongo()
-                .db
                 .collection::<Document>("user_with_enforced_indexes_and_existing_collection")
                 .drop()
                 .await
                 .unwrap();
 
             get_mongo()
-                .db
                 .create_collection("user_with_enforced_indexes_and_existing_collection")
                 .await
                 .unwrap();
@@ -396,7 +392,6 @@ mod enforce_indexes {
         .await;
 
         let indexes = get_mongo()
-            .db
             .collection::<Document>("user_with_enforced_indexes_and_existing_collection")
             .list_indexes()
             .await
@@ -454,7 +449,6 @@ mod enforce_validation {
     async fn new_collection() {
         non_concurrently(async {
             get_mongo()
-                .db
                 .collection::<Document>("user_with_enforced_validation")
                 .drop()
                 .await
@@ -464,7 +458,7 @@ mod enforce_validation {
         })
         .await;
 
-        let metadata = std::pin::pin!(get_mongo().db.list_collections().await.unwrap().try_filter(
+        let metadata = std::pin::pin!(get_mongo().list_collections().await.unwrap().try_filter(
             |spec| futures_util::future::ready(spec.name == "user_with_enforced_validation")
         ))
         .next()
@@ -497,14 +491,12 @@ mod enforce_validation {
     async fn existing_collection() {
         non_concurrently(async {
             get_mongo()
-                .db
                 .collection::<Document>("user_with_enforced_validation_and_existing_collection")
                 .drop()
                 .await
                 .unwrap();
 
             get_mongo()
-                .db
                 .create_collection("user_with_enforced_validation_and_existing_collection")
                 .await
                 .unwrap();
@@ -513,7 +505,7 @@ mod enforce_validation {
         })
         .await;
 
-        let metadata = std::pin::pin!(get_mongo().db.list_collections().await.unwrap().try_filter(
+        let metadata = std::pin::pin!(get_mongo().list_collections().await.unwrap().try_filter(
             |spec| futures_util::future::ready(
                 spec.name == "user_with_enforced_validation_and_existing_collection"
             )
@@ -547,7 +539,7 @@ mod enforce_validation {
         })
         .await;
 
-        let metadata = std::pin::pin!(get_mongo().db.list_collections().await.unwrap().try_filter(
+        let metadata = std::pin::pin!(get_mongo().list_collections().await.unwrap().try_filter(
             |spec| futures_util::future::ready(
                 spec.name == "user_with_enforced_json_schema_validation_only"
             )
@@ -592,7 +584,7 @@ mod enforce_validation {
         })
         .await;
 
-        let metadata = std::pin::pin!(get_mongo().db.list_collections().await.unwrap().try_filter(
+        let metadata = std::pin::pin!(get_mongo().list_collections().await.unwrap().try_filter(
             |spec| futures_util::future::ready(
                 spec.name == "user_with_enforced_json_schema_and_query_validation"
             )

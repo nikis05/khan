@@ -7,14 +7,11 @@ use mongodb::{
     bson::{doc, oid::ObjectId},
 };
 
-use khan::Mongo;
-
 #[path = "test_entities.rs"]
 mod test_entities;
 
 #[allow(unused_imports)]
 pub use test_entities::*;
-
 
 /// Runtime shared by tests and doctests.
 pub static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
@@ -26,7 +23,7 @@ pub static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 
 static DATABASE: OnceLock<Database> = OnceLock::new();
 
-fn database() -> &'static Database{
+fn database() -> &'static Database {
     DATABASE.get_or_init(|| {
         RUNTIME.block_on(async {
             let client = mongodb::Client::with_uri_str(mongodb_uri()).await.unwrap();
@@ -42,16 +39,14 @@ fn database() -> &'static Database{
                 ObjectId::new().to_hex()
             );
 
-            
-               client.database(&database_name)
-          
+            client.database(&database_name)
         })
     })
 }
 
-/// Returns a Mongo handle backed by the shared test database.
-pub fn mongo() -> Mongo<'static> {
-    (database()).into()
+/// Returns a `MongoDB` database backed by the shared test fixture.
+pub fn mongo() -> &'static Database {
+    database()
 }
 
 /// Starts the shared fixture before entering an async test runtime.

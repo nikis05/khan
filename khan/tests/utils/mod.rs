@@ -8,6 +8,6 @@ fn constructor() {
     shared::initialize();
 }
 
-pub fn get_mongo() -> khan::Mongo<'static> {
+pub fn get_mongo() -> &'static khan::mongodb::Database {
     mongo()
 }

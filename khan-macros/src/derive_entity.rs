@@ -529,7 +529,7 @@ fn build<'a>(
             }
 
             impl #krate::Filter<#ident> for TypedFilter<'_> {
-                fn to_document(&self) -> #mongodb::bson::Document {
+                fn to_document(&self) -> #mongodb::error::Result<#mongodb::bson::Document> {
                     let mut document = #mongodb::bson::Document::new();
 
                     #(
@@ -537,12 +537,12 @@ fn build<'a>(
                             #mongodb::bson::Document::insert(
                                 &mut document,
                                 #field_lits,
-                                #krate::FilterOperator::to_document(val)
+                                #krate::FilterOperator::to_document(val)?
                             );
                         }
                     )*
 
-                    document
+                    ::std::result::Result::Ok(document)
                 }
             }
 
@@ -554,7 +554,7 @@ fn build<'a>(
             }
 
             impl #krate::Update<#ident> for TypedUpdate {
-                fn to_document(&self) -> #mongodb::bson::Document {
+                fn to_document(&self) -> #mongodb::error::Result<#mongodb::bson::Document> {
                     let mut inner_document = #mongodb::bson::Document::new();
 
                     #(
@@ -562,7 +562,8 @@ fn build<'a>(
                             #mongodb::bson::Document::insert(
                                 &mut inner_document,
                                 #field_lits,
-                                ::std::result::Result::unwrap(#mongodb::bson::to_bson(val)),
+                                #mongodb::bson::to_bson(val)
+                                    .map_err(#mongodb::error::Error::custom)?,
                             );
                         }
                     )*
@@ -574,7 +575,7 @@ fn build<'a>(
                         inner_document,
                     );
 
-                    document
+                    ::std::result::Result::Ok(document)
                 }
             }
 
