@@ -33,8 +33,7 @@ fn build(vis: &Visibility, ident: &Ident, fields: &[(Ident, Option<String>)]) ->
                 &field
                     .1
                     .as_deref()
-                    .map(Cow::Borrowed)
-                    .unwrap_or_else(|| Cow::Owned(field.0.to_string())),
+                    .map_or_else(|| Cow::Owned(field.0.to_string()), Cow::Borrowed),
                 Span::call_site(),
             )
         })

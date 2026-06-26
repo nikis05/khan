@@ -9,8 +9,6 @@ macro_rules! extract {
     };
 }
 
-pub(crate) use extract;
-
 pub fn extract_named_fields(span: Span, data: Data) -> Result<FieldsNamed> {
     let Data::Struct(data_struct) = data else {
         return Err(Error::new(span, "expected struct"));
@@ -25,6 +23,7 @@ pub fn extract_named_fields(span: Span, data: Data) -> Result<FieldsNamed> {
     Ok(named_fields)
 }
 
+#[allow(clippy::needless_continue)]
 pub fn extract_serde_rename(field: &Field) -> Option<String> {
     #[derive(FromAttributes)]
     #[darling(attributes(serde))]

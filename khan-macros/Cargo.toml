@@ -10,17 +10,18 @@ license = "MIT"
 proc-macro = true
 
 [dependencies]
-chrono = { version = "0.4.40", features = ["serde"] }
-darling = "0.20.11"
-either = "1.15.0"
+chrono = { version = "0.4.45", features = ["serde"] }
+darling = "0.23.0"
+either = "1.16.0"
 heck = "0.5.0"
-itertools = "0.14.0"
-proc-macro-crate = "3.3.0"
-proc-macro2 = "1.0.94"
-quote = "1.0.40"
-syn = "2.0.100"
+indexmap = { version = "2.14.0", optional = true }
+itertools = "0.15.0"
+proc-macro-crate = "3.5.0"
+proc-macro2 = "1.0.106"
+quote = "1.0.46"
+syn = "2.0.118"
 
 [features]
-meta = []
+meta = ["dep:indexmap"]
 schema = []
 test = []

@@ -160,7 +160,7 @@ pub async fn enforce_indexes(mongo: Mongo<'_>) -> Result<()> {
         mongo
             .db
             .collection::<Document>(metadata.collection_name())
-            .create_indexes(indexes.into_iter())
+            .create_indexes(indexes)
             .await?;
     }
 

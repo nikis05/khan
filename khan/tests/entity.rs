@@ -32,6 +32,7 @@ mod fields_derive {
 
     #[test]
     fn to_string_impl_is_correct() {
+        #[allow(dead_code)]
         #[derive(Serialize, Deserialize, Fields)]
         struct Profile {
             avatar_url: String,

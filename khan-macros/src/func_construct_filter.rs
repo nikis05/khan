@@ -32,23 +32,20 @@ impl Parse for Field {
 
         let mut operator_and_operand = None;
 
-        if let Expr::Call(expr_call) = &operator_or_value {
-            if let Expr::Path(expr_path) = expr_call.func.as_ref() {
-                if let Some(ident) = expr_path.path.get_ident() {
-                    if (ident == "Eq"
-                        || ident == "Ne"
-                        || ident == "Gt"
-                        || ident == "Gte"
-                        || ident == "Lt"
-                        || ident == "Lte"
-                        || ident == "In"
-                        || ident == "Nin")
-                        && expr_call.args.len() == 1
-                    {
-                        operator_and_operand = Some((ident, expr_call.args[0].clone()));
-                    }
-                }
-            }
+        if let Expr::Call(expr_call) = &operator_or_value
+            && let Expr::Path(expr_path) = expr_call.func.as_ref()
+            && let Some(ident) = expr_path.path.get_ident()
+            && (ident == "Eq"
+                || ident == "Ne"
+                || ident == "Gt"
+                || ident == "Gte"
+                || ident == "Lt"
+                || ident == "Lte"
+                || ident == "In"
+                || ident == "Nin")
+            && expr_call.args.len() == 1
+        {
+            operator_and_operand = Some((ident, expr_call.args[0].clone()));
         }
 
         let output = match operator_and_operand {

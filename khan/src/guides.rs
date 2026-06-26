@@ -18,17 +18,20 @@
 ///
 /// ## Example
 ///
-/// ```
+/// ```ignore
 /// use serde::{Serialize, Deserialize};
 /// use khan::Entity;
 /// use mongodb::bson::oid::ObjectId;
 ///
 /// #[derive(Serialize, Deserialize, Entity)]
 /// struct User {
+///   #[serde(rename = "_id")]
 ///   id: ObjectId,
 ///   name: String,
 ///   password: String,
 /// }
+///
+/// assert_eq!(User::COLLECTION_NAME, "user");
 /// ```
 ///
 /// Once you derive [`Entity`](crate::Entity) for a type, Khan will map it to a `MongoDB`
@@ -42,25 +45,39 @@
 /// derived automatically alongside `Entity`.
 ///
 /// ```
+/// # use khan::{Entity, Selectable, SelectableWithId, by_id};
+/// # #[path = "test_support.rs"] mod test_support;
+/// # use test_support::{RUNTIME, User, mongo};
+/// # use mongodb::bson::oid::ObjectId;
+/// # async fn run(mut mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
 /// let user = User {
-///   id: ObjectId::new()
+///   id: ObjectId::new(),
+/// #   email: test_support::unique("kit@example.com"),
+/// #   avatar_url: "https://example.com/kit.png".into(),
 ///   name: "Kit Isaev".into(),
 ///   password: "somepassword".into(),
+/// #   index: 0.into(),
 /// };
+/// # let user_id = user.id;
 ///
 ///
 /// // Equivalent to:
 /// // db.user.insertOne({ _id: user.id, name: "Kit Isaev", password: "somepassword" })
-/// user.insert(mongo).await?;
+/// user.insert(mongo.rb()).await?;
 ///
 /// // Equivalent to:
 /// // db.user.findOne({ _id: user.id })
-/// let user = User::find_one(by_id(user.id)).await?.unwrap();
+/// let user = User::find_one(mongo.rb(), by_id(user_id)).await?.unwrap();
+/// assert_eq!(user.id, user_id);
 ///
 /// // Equivalent to:
 /// // db.user.deleteOne({ _id: user.id })
-/// user.remove(mongo).await?;
+/// let result = user.remove(mongo.rb()).await?;
+/// assert!(result.deleted());
 ///
+/// # Ok(())
+/// # }
+/// # RUNTIME.block_on(run(mongo())).unwrap();
 /// ```
 ///
 /// ## Creating `Mongo`
@@ -73,7 +90,7 @@
 /// It is accepted by all Khan operations and can be created from a
 /// [`Database`](mongodb::Database) instance:
 ///
-/// ```
+/// ```ignore
 /// let client = Client::with_uri_str("mongodb://example.com").await?;
 /// let db = client.database("mydb");
 /// let mongo: Mongo = db.into();
@@ -88,15 +105,28 @@
 /// call [`.rb()`](crate::Mongo::rb) to reborrow it:
 ///
 /// ```
+/// # use khan::{Entity, Mongo, Selectable, SelectableWithId};
+/// # #[path = "test_support.rs"] mod test_support;
+/// # use test_support::{RUNTIME, User, mongo, user};
+/// # async fn run(mut setup_mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
+/// # let db = setup_mongo.db.clone();
+/// # let email = test_support::unique("kit@example.com");
+/// # let mut seed = test_support::user();
+/// # seed.email = email.clone();
+/// # seed.insert(setup_mongo.rb()).await?;
 /// let mut mongo = Mongo::new(&db);
 ///
 /// let user = User::find_one(mongo.rb(), user::filter! {
-///     email: "kit@example.com"
+///     email: &email
 /// }).await?;
 ///
 /// if let Some(user) = user {
-///     user.remove(mongo.rb()).await?;
+///     let result = user.remove(mongo.rb()).await?;
+///     assert!(result.deleted());
 /// }
+/// # Ok(())
+/// # }
+/// # RUNTIME.block_on(run(mongo())).unwrap();
 /// ```
 ///
 /// ## Method overview
@@ -150,17 +180,25 @@ mod getting_started {}
 ///
 /// For example, for the following struct:
 ///
-/// ```
-/// #[derive(Entity)]
+/// ```ignore
+/// use khan::Entity;
+/// use mongodb::bson::oid::ObjectId;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize, Entity)]
+/// #[entity(skip_schema_validation)]
 /// struct User {
+///     #[serde(rename = "_id")]
 ///     id: ObjectId,
 ///     name: String,
 /// }
+///
+/// assert_eq!(User::FIELDS, None);
 /// ```
 ///
 /// The following helper module will be generated:
 ///
-/// ```
+/// ```ignore
 /// mod user {
 ///     pub struct TypedFilter {
 ///         id: Field<FilterOperator<ObjectId>>,
@@ -200,10 +238,16 @@ mod getting_started {}
 /// [`update_one`](crate::Entity::update_one), and [`update`](crate::Entity::update).
 ///
 /// ```
-/// let user = User::find(mongo, user::TypedFilter {
+/// # use khan::{Field, Filter, FilterOperator};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
+/// let filter = user::TypedFilter {
 ///     name: Field::Set(FilterOperator::Eq("Kit")),
 ///     ..Default::default()
-/// }).await?;
+/// };
+///
+/// assert_eq!(filter.to_document(), doc! { "name": { "$eq": "Kit" } });
 /// ```
 ///
 /// Equivalent `MongoDB` query:
@@ -213,16 +257,16 @@ mod getting_started {}
 /// ```
 ///
 /// ```
-/// User::update_one(mongo,
-///     user::TypedFilter {
-///         name: Field::Set(FilterOperator::Eq("Kit")),
-///         ..Default::default()
-///     },
-///     user::TypedUpdate {
-///         name: Field::Set("K.I.".to_string()),
-///         ..Default::default()
-///     }
-/// ).await?;
+/// # use khan::{Field, Update};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
+/// let update = user::TypedUpdate {
+///     name: Field::Set("K.I.".to_string()),
+///     ..Default::default()
+/// };
+///
+/// assert_eq!(update.to_document(), doc! { "$set": { "name": "K.I." } });
 /// ```
 ///
 /// Equivalent `MongoDB` update:
@@ -237,17 +281,29 @@ mod getting_started {}
 /// that simplify the construction of `TypedFilter` and `TypedUpdate`.
 ///
 /// ```
+/// # use khan::{Filter, Selectable};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
 /// let filter = user::filter! {
 ///     name: "Kit"
 /// };
+///
+/// assert_eq!(filter.to_document(), doc! { "name": { "$eq": "Kit" } });
 /// ```
 ///
 /// Expands to:
 /// ```
+/// # use khan::{Field, Filter, FilterOperator};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
 /// let filter = user::TypedFilter {
 ///     name: Field::Set(FilterOperator::Eq("Kit")),
 ///     ..Default::default()
 /// };
+///
+/// assert_eq!(filter.to_document(), doc! { "name": { "$eq": "Kit" } });
 /// ```
 ///
 /// By default, the `filter!` macro uses the `$eq` comparison operator. Other comparison
@@ -255,32 +311,56 @@ mod getting_started {}
 /// explicitly.
 ///
 /// ```
+/// # use khan::{Filter, Selectable};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
 /// let filter = user::filter! {
 ///     name: Ne("Kit")
 /// };
+///
+/// assert_eq!(filter.to_document(), doc! { "name": { "$ne": "Kit" } });
 /// ```
 ///
 /// Expands to:
 /// ```
+/// # use khan::{Field, Filter, FilterOperator};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
 /// let filter = user::TypedFilter {
 ///     name: Field::Set(FilterOperator::Ne("Kit")),
 ///     ..Default::default()
 /// };
+///
+/// assert_eq!(filter.to_document(), doc! { "name": { "$ne": "Kit" } });
 /// ```
 ///
 /// And for updates:
 /// ```
+/// # use khan::{Selectable, Update};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
 /// let update = user::update! {
 ///     name: "Kit".to_string()
 /// };
+///
+/// assert_eq!(update.to_document(), doc! { "$set": { "name": "Kit" } });
 /// ```
 ///
 /// Expands to:
 /// ```
+/// # use khan::{Field, Update};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
 /// let update = user::TypedUpdate {
 ///     name: Field::Set("Kit".to_string()),
 ///     ..Default::default()
 /// };
+///
+/// assert_eq!(update.to_document(), doc! { "$set": { "name": "Kit" } });
 /// ```
 ///
 /// ## Untyped filters and updates
@@ -296,13 +376,15 @@ mod getting_started {}
 /// directly from raw BSON:
 ///
 /// ```
-/// let filter = UntypedFilter::new(bson::doc! {
+/// # use khan::{Filter, UntypedFilter};
+/// # use khan::mongodb::bson::{self, doc};
+/// let filter: UntypedFilter<()> = UntypedFilter::new(bson::doc! {
 ///     "name": {
 ///         "$regex": "^Kit$"
 ///     }
 /// });
 ///
-/// let user = User::find(mongo, filter).await?;
+/// assert_eq!(filter.to_document(), doc! { "name": { "$regex": "^Kit$" } });
 /// ```
 ///
 /// Similarly, you can use `UntypedUpdate` for expressing complex update operations
@@ -310,13 +392,24 @@ mod getting_started {}
 /// on deeply nested fields:
 ///
 /// ```
-/// let update = UntypedUpdate::new(bson::doc! {
+/// # use khan::{UntypedUpdate, Update};
+/// # use khan::mongodb::bson::{self, oid::ObjectId};
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::Comment;
+/// # let comment = bson::to_bson(&Comment {
+/// #     id: ObjectId::new(),
+/// #     text: "hi".into(),
+/// # }).unwrap();
+/// let update: UntypedUpdate<()> = UntypedUpdate::new(bson::doc! {
 ///     "$push": {
-///         "messages": { "$each": ["hi"], "$slice": -10 }
+///         "comments": { "$each": [comment.clone()], "$slice": -10 }
 ///     }
 /// });
 ///
-/// User::update_one(mongo, user::filter! { id: user_id }, update).await?;
+/// assert_eq!(
+///     update.to_document(),
+///     bson::doc! { "$push": { "comments": { "$each": [comment], "$slice": -10 } } }
+/// );
 /// ```
 ///
 /// ### `Fields` enum
@@ -331,17 +424,27 @@ mod getting_started {}
 /// For example, instead of writing:
 ///
 /// ```
-/// let filter = UntypedFilter::new(bson::doc! {
+/// # use khan::{Filter, UntypedFilter};
+/// # use khan::mongodb::bson;
+/// let filter: UntypedFilter<()> = UntypedFilter::new(bson::doc! {
 ///     "name": { "$regex": "^Kit$" }
 /// });
+///
+/// assert_eq!(filter.to_document(), bson::doc! { "name": { "$regex": "^Kit$" } });
 /// ```
 ///
 /// You can write:
 ///
 /// ```
-/// let filter = UntypedFilter::new(bson::doc! {
-///     user::Columns::Name: { "$regex": "^Kit$" }
+/// # use khan::{Filter, UntypedFilter};
+/// # use khan::mongodb::bson;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
+/// let filter: UntypedFilter<()> = UntypedFilter::new(bson::doc! {
+///     user::Fields::Name: { "$regex": "^Kit$" }
 /// });
+///
+/// assert_eq!(filter.to_document(), bson::doc! { "name": { "$regex": "^Kit$" } });
 /// ```
 ///
 /// The enum also honors `#[serde(rename = "...")]`, so renamed fields will be mapped to
@@ -365,42 +468,23 @@ mod getting_started {}
 /// Example:
 ///
 /// ```
-/// #[derive(Serialize, Deserialize, Entity)]
-/// struct Post {
-///   id: ObjectId,
-///   text: String,
-///   comments: Vec<Comment>,
-/// }
-///
-/// #[derive(Serialize, Deserialize)]
-/// struct Comment {
-///   id: ObjectId,
-///   text: String,
-/// }
-///
-/// let mut post = Post {
-///   id: ObjectId::new(),
-///   text: "Post text".into(),
-///   comments: vec![
-///     Comment {
-///       id: ObjectId::new(),
-///       text: "Comment #1".into(),
-///     },
-///     Comment {
-///       id: ObjectId::new(),
-///       text: "Comment #2".into(),
-///     }
-///   ],
-/// }
-/// .insert(mongo)
-/// .await?;
-///
-/// post.patch(mongo, UntypedUpdateApply::new(
+/// # use khan::{Entity, Selectable, SelectableWithId, UntypedUpdateApply};
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_support.rs"] mod test_support;
+/// # use test_support::{Post, RUNTIME, mongo};
+/// # async fn run(mut mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
+/// # let mut post = test_support::post();
+/// # post.insert(mongo.rb()).await?;
+/// let result = post.patch(mongo.rb(), UntypedUpdateApply::new(
 ///     doc! { "$pop": { "comments": 1 } },
-///     |p| { p.comments.pop(); },
+///     |p: &mut Post| { p.comments.pop(); },
 /// )).await?;
 ///
-/// assert_eq!(post.comments.len(), 0);
+/// assert!(result.matched());
+/// assert_eq!(post.comments.len(), 1);
+/// # Ok(())
+/// # }
+/// # RUNTIME.block_on(run(mongo())).unwrap();
 /// ```
 ///
 /// This will remove the last comment from both the database and the local `post` instance.
@@ -413,9 +497,13 @@ mod filters_and_updates {}
 ///
 /// To define projections for an entity, declare them as part of the attribute:
 ///
-/// ```rust
+/// ```ignore
+/// use khan::Entity;
+/// use mongodb::bson::oid::ObjectId;
+/// use serde::{Deserialize, Serialize};
+///
 /// #[derive(Serialize, Deserialize, Entity)]
-/// #[entity(projections(
+/// #[entity(skip_schema_validation, collection = "guide_projection_user", projections(
 ///     PublicProfile(id, name, avatar_url),
 ///     AuthData(id, email, password)
 /// ))]
@@ -427,6 +515,9 @@ mod filters_and_updates {}
 ///     email: String,
 ///     password: String,
 /// }
+///
+/// assert_eq!(user::PublicProfile::FIELDS, Some(["_id", "name", "avatar_url"].as_ref()));
+/// assert_eq!(user::AuthData::FIELDS, Some(["_id", "email", "password"].as_ref()));
 /// ```
 ///
 /// This will generate two additional structs inside the `user` helper module:
@@ -440,28 +531,46 @@ mod filters_and_updates {}
 /// - `find_one`
 /// - `find_one_and_update`
 ///
-/// For example:
+/// Their projection document is generated from the fields declared in the
+/// `#[entity(projections(...))]` attribute:
 ///
 /// ```
-/// let profile = user::PublicProfile::find_one(mongo, user::filter! {
-///     name: "Kit"
-/// }).await?;
+/// # use khan::Selectable;
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::user;
+/// let projection = user::PublicProfile::projection();
+///
+/// assert_eq!(projection, Some(doc! { "name": 1, "avatar_url": 1 }));
 /// ```
 ///
-/// ...allows you to select a `PublicProfile` from the `user` collection, which only
-/// includes `id`, `name`, and `avatar_url` fields.
+/// Khan uses that projection when selecting a `PublicProfile` from the `user`
+/// collection, so the returned value only includes `id`, `name`, and `avatar_url`
+/// fields.
 ///
 /// If a projection includes the `id` field, it also implements
 /// [`SelectableWithId`](crate::SelectableWithId), and its instances support `remove` and
 /// `patch` methods:
 ///
 /// ```
-/// let mut profile = user::PublicProfile::find_one(mongo, user::filter! {
-///     name: "Kit"
-/// }).await?;
+/// # use khan::{Entity, Selectable, SelectableWithId};
+/// # #[path = "test_support.rs"] mod test_support;
+/// # use test_support::{RUNTIME, mongo, user};
+/// # async fn run(mut mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
+/// # let name = test_support::unique("Kit");
+/// # let mut seed = test_support::user();
+/// # seed.name = name.clone();
+/// # seed.insert(mongo.rb()).await?;
+/// let mut profile = user::PublicProfile::find_one(mongo.rb(), user::filter! {
+///     name: &name
+/// }).await?.unwrap();
 ///
-/// profile.patch(mongo, user::patch! { name: "Tom" }).await?;
+/// let result = profile.patch(mongo.rb(), user::update! { name: "Tom".into() }).await?;
+/// assert!(result.matched());
 /// assert_eq!(&profile.name, "Tom");
+/// # Ok(())
+/// # }
+/// # RUNTIME.block_on(run(mongo())).unwrap();
 /// ```
 ///
 mod projections {}
@@ -474,7 +583,7 @@ mod projections {}
 /// [`mongodb` crate API](mongodb::ClientSession), then construct a [`Mongo`](crate::Mongo)
 /// instance using `(&Database, &mut ClientSession)` instead of just `&Database`:
 ///
-/// ```
+/// ```ignore
 /// let client = Client::with_uri_str("mongodb://localhost:27017").await?;
 /// let db = client.database("mydb");
 ///
@@ -505,7 +614,7 @@ mod projections {}
 /// transaction, and want to make sure that it is not deleted before the transaction
 /// commits:
 ///
-/// ```
+/// ```ignore
 /// session
 ///     .start_transaction()
 ///     .and_run(
@@ -514,7 +623,7 @@ mod projections {}
 ///             let mut mongo = (db, session).into();
 ///
 ///             if !Post::exists(mongo.rb(), by_id(post_id)).await? {
-///                 return Error::custom("Post is not found");
+///                 return Err(Error::custom("Post is not found"));
 ///             }
 ///
 ///             // Post may be deleted betweeen these two operations,
@@ -537,7 +646,7 @@ mod projections {}
 /// if adding a comment increments the `commentsCount` field on `Post`), no additional steps
 /// are needed — the update itself will act as a lock.
 ///
-/// ```
+/// ```ignore
 /// session
 ///     .start_transaction()
 ///     .and_run(
@@ -555,8 +664,8 @@ mod projections {}
 ///             )
 ///             .await?;
 ///
-///             if (!result.matched()) {
-///                 return Error::custom("Post is not found");
+///             if !result.matched() {
+///                 return Err(Error::custom("Post is not found"));
 ///             }
 ///
 ///             // Safe to insert the comment now — if the post were deleted concurrently,
@@ -578,7 +687,7 @@ mod projections {}
 /// However, if no meaningful changes are required, you can perform a *dummy update*
 /// by writing to an unused utility field, such as `_lock.seed`, with a random value:
 ///
-/// ```
+/// ```ignore
 /// session
 ///     .start_transaction()
 ///     .and_run(
@@ -618,7 +727,7 @@ mod projections {}
 /// documents have been locked and which haven’t. This makes it easy to accidentally skip a
 /// necessary lock, leading to race conditions or inconsistent state:
 ///
-/// ```
+/// ```ignore
 /// // Model code
 /// async fn create_post(trx: Transaction<'_>, text: String) -> Result<ObjectId> {
 ///     let id = ObjectId::new();
@@ -689,6 +798,16 @@ mod projections {}
 /// protected from concurrent modification:
 ///
 /// ```
+/// # use khan::{Entity, Lock};
+/// # #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::post;
+/// let locked_post = Lock::new_unchecked(post());
+/// let locked_id = locked_post.locked_id();
+///
+/// assert_eq!(*locked_id, locked_post.id);
+/// ```
+///
+/// ```ignore
 /// // Model code
 /// async fn create_post(
 ///     trx: Transaction<'_>,
@@ -704,7 +823,7 @@ mod projections {}
 ///         id,
 ///         text,
 ///     }
-///     .lock_insert(trx.into())
+///     .locking_insert(trx.into())
 ///     .await?;
 ///
 ///     // Convert the locked post into a locked ID, so we can safely pass it to other methods.
@@ -793,7 +912,7 @@ mod transactions_and_locking {}
 ///
 /// Instead of using `ObjectId` directly in your entities, define a newtype wrapper:
 ///
-/// ```
+/// ```ignore
 /// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 /// #[serde(transparent)]
 /// pub struct PostId(pub ObjectId);
@@ -805,7 +924,7 @@ mod transactions_and_locking {}
 ///
 /// **NOT RECOMMENDED:**
 ///
-/// ```
+/// ```ignore
 /// #[derive(Serialize, Deserialize, Entity)]
 /// struct Post {
 ///     id: ObjectId,
@@ -822,12 +941,12 @@ mod transactions_and_locking {}
 ///
 /// **RECOMMENDED:**
 ///
-/// ```
-/// /// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+/// ```ignore
+/// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 /// #[serde(transparent)]
 /// pub struct PostId(pub ObjectId);
 ///
-/// /// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+/// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 /// #[serde(transparent)]
 /// pub struct CommentId(pub ObjectId);
 ///
@@ -855,7 +974,7 @@ mod transactions_and_locking {}
 ///
 /// **NOT RECOMMENDED:**
 ///
-/// ```
+/// ```ignore
 /// #[derive(Serialize, Deserialize, Entity)]
 /// struct Post {
 ///     id: ObjectId,
@@ -877,7 +996,7 @@ mod transactions_and_locking {}
 ///
 /// **RECOMMENDED:**
 ///
-/// ```
+/// ```ignore
 /// mod model {
 ///     mod entity {
 ///         use super::*;
@@ -937,7 +1056,7 @@ mod transactions_and_locking {}
 /// Instead, we recommend defining your own type-safe interfaces for advanced operations on a case-by-case
 /// basis. A good pattern is to implement them as additional methods on your `Entity` structs:
 ///
-/// ```
+/// ```ignore
 /// #[derive(Serialize, Deserialize, Entity)]
 /// struct User {
 ///     #[serde(rename = "_id")]
@@ -996,9 +1115,14 @@ mod patterns_and_recommendations {}
 /// Indexes can be declared on your entities using the `#[entity(indexes(...))]` attribute. This is type-safe
 /// — the compiler checks that all referenced fields actually exist.
 ///
-/// ```rust
+/// ```ignore
+/// use khan::Entity;
+/// use mongodb::{bson::oid::ObjectId, options::IndexOptions};
+/// use serde::{Deserialize, Serialize};
+///
 /// #[derive(Serialize, Deserialize, Entity)]
 /// #[entity(
+///     skip_schema_validation,
 ///     indexes(
 ///         // the name of the index
 ///         email_idx(
@@ -1012,18 +1136,30 @@ mod patterns_and_recommendations {}
 ///     )
 /// )]
 /// struct User {
+///     #[serde(rename = "_id")]
 ///     id: ObjectId,
 ///     email: String,
 ///     password: String,
 /// }
 /// ```
 ///
+/// ```
+/// # use khan::Entity;
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// let indexes = test_support::IndexedUser::indexes();
+/// assert_eq!(indexes.len(), 1);
+/// assert_eq!(indexes[0].keys, doc! { "email": 1 });
+/// assert_eq!(indexes[0].options.as_ref().unwrap().name.as_deref(), Some("email_idx"));
+/// assert_eq!(indexes[0].options.as_ref().unwrap().sparse, Some(true));
+/// ```
+///
 /// Notes:
 /// - Use quoted strings for descending indexes: `keys(created_at = "-1")`.
 /// - If the index name is set to `__`, `MongoDB` will generate the name automatically.
 /// - To apply indexes to collections at runtime, call:
-///   ```rust
-///   khan::meta::enforce_indexes(&db).await?;
+///   ```ignore
+///   khan::meta::enforce_indexes(mongo).await?;
 ///   ```
 ///
 /// ## Query validation
@@ -1031,7 +1167,11 @@ mod patterns_and_recommendations {}
 /// `MongoDB` supports per-collection validation rules that restrict allowed query shapes. You can declare
 /// query validation rules using the `#[entity(query_validation = ...)]` attribute.
 ///
-/// ```rust
+/// ```ignore
+/// use khan::Entity;
+/// use mongodb::bson::{doc, oid::ObjectId};
+/// use serde::{Deserialize, Serialize};
+///
 /// #[derive(Serialize, Deserialize, Entity)]
 /// #[entity(
 ///     skip_schema_validation,
@@ -1046,16 +1186,31 @@ mod patterns_and_recommendations {}
 /// }
 /// ```
 ///
+/// ```
+/// # use khan::Entity;
+/// # use khan::mongodb::bson::doc;
+/// # #[path = "test_entities.rs"] mod test_support;
+/// assert_eq!(
+///     test_support::IndexedUser::query_validation(),
+///     Some(doc! {
+///         "$gt": [
+///             { "$strLenCP": { "$getField": test_support::indexed_user::Fields::Name } },
+///             2
+///         ]
+///     })
+/// );
+/// ```
+///
 /// Validation rules can be applied by calling:
-/// ```rust
-/// khan::meta::enforce_validation(&db).await?;
+/// ```ignore
+/// khan::meta::enforce_validation(mongo).await?;
 /// ```
 ///
 /// ## JSON Schema validation
 ///
 /// If the `schema` feature is enabled, Khan will generate JSON Schema validation rules for all entities by
 /// default. You can disable it per-entity using:
-/// ```rust
+/// ```ignore
 /// #[entity(skip_schema_validation)]
 /// ```
 ///
@@ -1086,9 +1241,9 @@ mod patterns_and_recommendations {}
 ///
 /// For more advanced setups (e.g. production migrations), use the lower-level API:
 ///
-/// ```rust
+/// ```ignore
 /// for metadata in khan::meta::entity_metadata() {
-///     println!("Collection: {}", metadata.collection_name);
+///     println!("Collection: {}", metadata.collection_name());
 ///     // Handle custom migration, validation, or indexing logic here
 /// }
 /// ```

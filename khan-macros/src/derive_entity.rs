@@ -1,3 +1,10 @@
+#![allow(clippy::needless_continue)]
+
+#[cfg(feature = "meta")]
+use darling::FromMeta;
+#[cfg(feature = "meta")]
+use indexmap::IndexMap;
+
 use crate::{
     prelude::*,
     utils::{build_fields_enum, extract_named_fields, extract_serde_rename, mongodb},
@@ -27,8 +34,59 @@ struct Attributes {
 #[cfg(feature = "meta")]
 #[derive(FromMeta)]
 struct IndexAttributes {
-    keys: HashMap<Ident, i8>,
+    keys: IndexKeys,
     options: Option<Expr>,
+}
+
+#[cfg(feature = "meta")]
+struct IndexKeys(IndexMap<Ident, i8>);
+
+#[cfg(feature = "meta")]
+impl FromMeta for IndexKeys {
+    fn from_list(items: &[darling::ast::NestedMeta]) -> darling::Result<Self> {
+        let mut keys = IndexMap::with_capacity(items.len());
+
+        for item in items {
+            let darling::ast::NestedMeta::Meta(syn::Meta::NameValue(meta)) = item else {
+                return Err(
+                    darling::Error::custom("expected `field = 1` or `field = \"-1\"`")
+                        .with_span(item),
+                );
+            };
+
+            let ident = meta.path.get_ident().cloned().ok_or_else(|| {
+                darling::Error::custom("expected field name").with_span(&meta.path)
+            })?;
+
+            let direction = match &meta.value {
+                Expr::Lit(expr) => match &expr.lit {
+                    syn::Lit::Int(lit) => lit.base10_parse::<i8>(),
+                    syn::Lit::Str(lit) => lit
+                        .value()
+                        .parse::<i8>()
+                        .map_err(|_| syn::Error::new(lit.span(), "expected `1` or `-1`")),
+                    _ => Err(syn::Error::new(expr.span(), "expected `1` or `-1`")),
+                },
+                Expr::Unary(expr) if matches!(expr.op, syn::UnOp::Neg(_)) => match &*expr.expr {
+                    Expr::Lit(expr) => match &expr.lit {
+                        syn::Lit::Int(lit) => lit.base10_parse::<i8>().map(|val| -val),
+                        _ => Err(syn::Error::new(expr.span(), "expected `1` or `-1`")),
+                    },
+                    _ => Err(syn::Error::new(expr.span(), "expected `1` or `-1`")),
+                },
+                expr => Err(syn::Error::new(expr.span(), "expected `1` or `-1`")),
+            }
+            .map_err(|err| darling::Error::custom(err).with_span(&meta.value))?;
+
+            if keys.insert(ident.clone(), direction).is_some() {
+                return Err(
+                    darling::Error::duplicate_field(&ident.to_string()).with_span(&meta.path)
+                );
+            }
+        }
+
+        Ok(Self(keys))
+    }
 }
 
 #[cfg(feature = "meta")]
@@ -126,11 +184,12 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
 
             let keys = index_attrs
                 .keys
+                .0
                 .into_iter()
                 .map(|(key, direction_val)| {
-                    if !fields.contains_key(&key) {
+                    let Some(field) = fields.get(&key) else {
                         return Err(Error::new_spanned(key, "unknown field"));
-                    }
+                    };
 
                     let direction = match direction_val {
                         1 => IndexDirection::Pos,
@@ -143,7 +202,10 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
                         }
                     };
 
-                    Ok((key, direction))
+                    Ok((
+                        field.rename.to_owned().unwrap_or_else(|| key.to_string()),
+                        direction,
+                    ))
                 })
                 .try_collect()?;
 
@@ -189,7 +251,7 @@ struct ProjectionConfig {
 #[cfg(feature = "meta")]
 struct IndexConfig {
     name: Option<Ident>,
-    keys: HashMap<Ident, IndexDirection>,
+    keys: IndexMap<String, IndexDirection>,
     options: Option<Expr>,
 }
 
@@ -230,14 +292,12 @@ fn build<'a>(
         .collect_vec();
 
     let filter_field_types = field_types.iter().map(|ty| {
-        if let Type::Path(type_path) = ty {
-            if type_path.qself.is_none() {
-                if let Some(ident) = type_path.path.get_ident() {
-                    if ident == "String" {
-                        return parse_quote! { str };
-                    }
-                }
-            }
+        if let Type::Path(type_path) = ty
+            && type_path.qself.is_none()
+            && let Some(ident) = type_path.path.get_ident()
+            && ident == "String"
+        {
+            return parse_quote! { str };
         }
 
         (*ty).to_owned()

@@ -1,3 +1,5 @@
+use syn::ItemFn;
+
 use crate::prelude::*;
 
 pub fn attr_async_test(attrs: TokenStream, input: TokenStream) -> Result<TokenStream> {

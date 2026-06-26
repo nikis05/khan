@@ -127,7 +127,7 @@ forward_display!(JavaScriptCodeWithScope);
 impl_wrapper!(
     JavaScriptCodeWithScope,
     bson::JavaScriptCodeWithScope,
-    "javascript"
+    "javascriptWithScope"
 );
 
 #[derive(

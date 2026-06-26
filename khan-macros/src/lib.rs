@@ -1,7 +1,8 @@
+#![warn(clippy::pedantic)]
+#![allow(clippy::too_many_lines)]
+
 #[cfg(feature = "test")]
 mod attr_async_test;
-#[warn(clippy::pedantic)]
-#[allow(clippy::too_many_lines)]
 mod derive_entity;
 mod derive_fields;
 mod func_construct_filter;

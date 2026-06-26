@@ -258,7 +258,7 @@ mod find_with_opts {
             Some(1),
             Some(3),
             Some({
-                let mut order_by = std::collections::HashMap::new();
+                let mut order_by = indexmap::IndexMap::new();
                 order_by.insert(user::Fields::Index, khan::Order::Asc);
                 order_by
             }),
@@ -300,7 +300,7 @@ mod find_with_opts {
             Some(1),
             Some(3),
             Some({
-                let mut order_by = std::collections::HashMap::new();
+                let mut order_by = indexmap::IndexMap::new();
                 order_by.insert(user::Fields::Index, khan::Order::Asc);
                 order_by
             }),

@@ -2,56 +2,82 @@
 //!
 //! ## Example
 //!
-//! ```
+//! ```ignore
+//! # use khan::{Entity, Selectable, SelectableWithId, by_id};
+//! # #[path = "test_support.rs"] mod test_support;
+//! # use test_support::{RUNTIME, mongo};
+//! # use mongodb::bson::oid::ObjectId;
+//! # use serde::{Deserialize, Serialize};
+//! # async fn run() -> mongodb::error::Result<()> {
+//! # let mut mongo = mongo();
 //! // Define an entity
-//! #[derive(Serialize, Deserialize, Entity)]
-//! #[entity(projections(Profile(email, password)))]
+//! #[derive(Serialize, Deserialize, Entity, Debug, PartialEq, Eq)]
+//! #[entity(skip_schema_validation, collection = "readme_user", projections(Profile(id, email, password)))]
 //! struct User {
+//!   #[serde(rename = "_id")]
+//!   id: ObjectId,
 //!   email: String,
 //!   username: String,
 //!   password: String,
-//!   created_at: chrono::DateTime<chrono::Utc>,
 //! }
-//!
-//! // Select an entity by id
-//! let person: User = User::find_one(mongo, by_id(user_id)).await?;
-//!
-//! // Select an entity by custom fields
-//! let recent_user: User = User::find_one(mongo, user::filter! {
-//!   created_at: Gt(Utc::now() - Duration::hours(1)),
-//! }).await?;
-//!  
-//! // Select only necessary fields (email, password) of entity
-//! let profile: Profile = Profile::find_one(mongo, by_id(user_id)).await?;
 //!
 //! // Insert an entity into the database
 //! let user = User {
+//!   id: ObjectId::new(),
 //!   email: "mail@example.com".into(),
 //!   username: "nikis05".into(),
 //!   password: "somepassword".into(),
-//!   created_at: chrono::Utc::now(),
 //! };
+//! let user_id = user.id;
 //!
-//! user.insert(mongo).await?;
+//! user.insert(mongo.rb()).await?;
+//!
+//! // Select an entity by id
+//! let person: User = User::find_one(mongo.rb(), by_id(user_id)).await?.unwrap();
+//! # assert_eq!(person.email, "mail@example.com");
+//!
+//! // Select an entity by custom fields
+//! let recent_user: User = User::find_one(mongo.rb(), user::filter! {
+//!   username: "nikis05"
+//! }).await?.unwrap();
+//! # assert_eq!(recent_user.id, user_id);
+//!
+//! // Select only necessary fields (email, password) of entity
+//! let profile: user::Profile = user::Profile::find_one(mongo.rb(), by_id(user_id)).await?.unwrap();
+//! # assert_eq!(profile.password, "somepassword");
 //!
 //! // Update an entity in the database
-//!
-//! User::update_one(mongo, by_id(user_id), user::patch! {
-//!   email: "new.email@example.com"
+//! User::update_one(mongo.rb(), by_id(user_id), user::update! {
+//!   email: "new.email@example.com".into()
 //! }).await?;
+//! # assert_eq!(User::find_one(mongo.rb(), by_id(user_id)).await?.unwrap().email, "new.email@example.com");
 //!
 //! // Update an entity in the database (struct is automatically updated)
-//!
-//! user.patch(mongo, user::patch! {
-//!   email: "new.email@example.com".into(),
+//! let mut user = User::find_one(mongo.rb(), by_id(user_id)).await?.unwrap();
+//! user.patch(mongo.rb(), user::update! {
+//!   email: "newer.email@example.com".into(),
 //!   password: "someotherpassword".into()
 //! }).await?;
+//! # assert_eq!(user.password, "someotherpassword");
 //!
 //! // Delete entities matching the filter
-//! User::delete_one(mongo, by_id(user_id)).await?;
+//! let result = User::delete_one(mongo.rb(), by_id(user_id)).await?;
+//! # assert!(result.deleted());
 //!
 //! // Remove a document from the database that corresponds to an instance
-//! user.remove(mongo).await?;
+//! let removable = User {
+//!   id: ObjectId::new(),
+//!   email: "remove@example.com".into(),
+//!   username: "remove-me".into(),
+//!   password: "temporary".into(),
+//! };
+//! let removable_id = removable.id;
+//! removable.insert(mongo.rb()).await?;
+//! removable.remove(mongo.rb()).await?;
+//! # assert!(User::find_one(mongo.rb(), by_id(removable_id)).await?.is_none());
+//! # Ok(())
+//! # }
+//! # RUNTIME.block_on(run()).unwrap();
 //! ```
 //!
 //! See [`guides`] module to learn more!
@@ -70,12 +96,16 @@ use mongodb::{
     error::Result,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use std::{collections::HashMap, fmt::Display, hash::Hash, marker::PhantomData, sync::LazyLock};
+use std::{fmt::Display, hash::Hash, marker::PhantomData, sync::LazyLock};
 
+pub use indexmap::{self, IndexMap};
 #[doc(hidden)]
 pub use khan_macros::{__private__construct_filter, __private__construct_update};
 pub use khan_macros::{Entity, Fields};
 pub use mongodb;
+
+#[cfg(any(doctest, test))]
+extern crate self as khan;
 
 /// High-level usage guides for Khan, covering core concepts like CRUD, filters, projections, transactions,
 /// and design patterns. Start here.
@@ -85,6 +115,9 @@ pub mod guides;
 /// Enabled with the `meta` feature.
 #[cfg(feature = "meta")]
 pub mod meta;
+#[cfg(any(doctest, test))]
+#[doc(hidden)]
+pub mod test_support;
 /// BSON-compatible types for use with JSON Schema validation.
 ///
 /// These types serve as drop-in replacements for BSON types that are not  supported by `MongoDB`'s JSON Schema
@@ -427,7 +460,7 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         filter: impl Filter<E> + 'a,
         skip: Option<u64>,
         limit: Option<i64>,
-        sort: Option<HashMap<E::Fields, Order>>,
+        sort: Option<IndexMap<E::Fields, Order>>,
     ) -> BoxFuture<'a, Result<Vec<Self>>> {
         async move {
             let Mongo { db, session } = mongo;
@@ -591,7 +624,8 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
     fn id(&self) -> E::Id;
 
     /// Updates the corresponding document in the database and applies the same changes to this in-memory
-    /// struct.
+    /// struct. Note that the struct will be updated even if the corresponding document wasn't updated
+    /// (e.g. because it has already been deleted from the database).
     fn patch<'a>(
         &'a mut self,
         mongo: Mongo<'a>,
@@ -696,10 +730,20 @@ impl<'a> Mongo<'a> {
     /// ### Example
     ///
     /// ```
-    /// mongo.run_transaction(("text", 42), |trx, (text, number)| async move {
+    /// # use futures_util::FutureExt;
+    /// # #[path = "test_support.rs"] mod test_support;
+    /// # use test_support::{RUNTIME, mongo};
+    /// # async fn run(mut mongo: khan::Mongo<'static>) -> mongodb::error::Result<()> {
+    /// let output = mongo.run_transaction(("text", 42), |trx, (text, number)| async move {
     ///     // use `trx` for database operations
-    ///     Ok(())
-    /// }).await?;
+    ///     assert!(trx.db.name().starts_with("khan_test_"));
+    ///     Ok(text.len() + *number as usize)
+    /// }.boxed()).await?;
+    ///
+    /// assert_eq!(output, 46);
+    /// # Ok(())
+    /// # }
+    /// # RUNTIME.block_on(run(mongo())).unwrap();
     /// ```
     pub async fn run_transaction<R, C: Send, F>(&mut self, context: C, callback: F) -> Result<R>
     where
@@ -781,8 +825,23 @@ impl<'a> From<Transaction<'a>> for Mongo<'a> {
 ///
 /// This macro is used to conditionally attach a transactional session to a query or command:
 ///
-/// ```rust
-/// with_session!(collection.find_one(doc), session)
+/// ```
+/// # use khan::with_session;
+/// # struct Session;
+/// # struct Query {
+/// #     used_session: bool,
+/// # }
+/// # impl Query {
+/// #     fn session(self, _session: &mut Session) -> Self {
+/// #         Self { used_session: true }
+/// #     }
+/// # }
+/// let mut session = Session;
+/// let result = with_session!(Query { used_session: false }, Some(&mut session));
+/// assert!(result.used_session);
+///
+/// let result = with_session!(Query { used_session: false }, Option::<&mut Session>::None);
+/// assert!(!result.used_session);
 /// ```
 ///
 /// If `session` is `Some`, it calls `.session(session)` on the query;
@@ -856,8 +915,14 @@ impl<E: Send> Filter<E> for UntypedFilter<E> {
 /// Variants correspond to common `MongoDB` query operators, such as `$eq`, `$ne`, `$gt`, etc.
 ///
 /// Example:
-/// ```rust
-/// Field::Set(FilterOperator::Gt(10))
+/// ```
+/// # use khan::{Field, FilterOperator};
+/// # use khan::mongodb::bson::doc;
+/// let field = Field::Set(FilterOperator::Gt(&10));
+///
+/// if let Field::Set(operator) = field {
+///     assert_eq!(operator.to_document(), doc! { "$gt": 10 });
+/// }
 /// ```
 ///
 /// This constructs a typed filter that translates to `{ "field": { "$gt": 10 } }`.
@@ -996,10 +1061,11 @@ pub enum Order {
 ///
 /// - `Set(value)` includes the field in the filter or update.
 /// - `Omit` means the field will be excluded from the generated document.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[allow(missing_docs)]
 pub enum Field<T> {
     Set(T),
+    #[default]
     Omit,
 }
 
@@ -1013,12 +1079,6 @@ impl<T> Field<T> {
             Some(val) => Self::Set(val),
             None => Self::Omit,
         }
-    }
-}
-
-impl<T> Default for Field<T> {
-    fn default() -> Self {
-        Self::Omit
     }
 }
 
