@@ -1,0 +1,12 @@
+[workspace]
+members = ["khan", "khan-macros"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+authors = ["Kit Isaev <14875494+nikis05@users.noreply.github.com>"]
+license = "MIT"
+repository = "https://github.com/nikis05/khan"
+rust-version = "1.88"
+readme = "README.md"

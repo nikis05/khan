@@ -1,10 +1,16 @@
 [package]
 name = "khan"
 description = "A MongoDB ODM"
-version = "0.0.1"
-edition = "2024"
-authors = ["Kit Isaev <14875494+nikis05@users.noreply.github.com>"]
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 dashmap = "6.1.0"

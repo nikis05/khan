@@ -1,18 +1,43 @@
-//! Khan is a `MongoDB` ODM for Rust.
+//! Khan is a `MongoDB` ORM (or, more precisely, an ODM) for Rust. It adds an entity API on top of the
+//! underlying `MongoDB` driver, with type-safe methods to create, query, update, and delete documents,
+//! as well as tools for maintaining consistency in multi-document transactions.
+//! It can also manage collection indexes and validation rules in a code-first manner.
+//!
+//! ## Why Khan?
+//!
+//! Khan is designed for applications that want Rust's type system around everyday `MongoDB` work
+//! without hiding `MongoDB` itself.
+//!
+//! - 🛡️ **Typed where repetition is costly.** Deriving [`Entity`] generates typed filters, updates,
+//!   field names, projections, and CRUD methods from the same Serde model used for BSON.
+//! - 🧰 **Explicit where `MongoDB` is powerful.** Raw BSON filters and updates remain deliberate escape
+//!   hatches, while the underlying [`mongodb`] API stays available for aggregation pipelines and
+//!   specialized operations.
+//! - 🔄 **Transaction-aware by construction.** Entity operations work with either a database or a
+//!   transaction context. [`DatabaseExt`] provides retry-aware transaction helpers, while [`Fence`]
+//!   can express document-level reference requirements in function signatures.
+//! - 🧩 **Code-first database metadata.** Optional features let entity declarations define and enforce
+//!   indexes, query-expression validators, and `MongoDB` JSON Schema validation.
+//! - 🎯 **A focused, composable API.** Khan handles common persistence and consistency concerns while
+//!   application architecture, domain behavior, and advanced `MongoDB` operations remain ordinary
+//!   Rust code.
 //!
 //! ## Example
 //!
-//! ```ignore
+//! ```rust
 //! # use khan::{Entity, Selectable, SelectableWithId, by_id};
 //! # #[path = "test_support.rs"] mod test_support;
 //! # use test_support::{RUNTIME, mongo};
 //! # use mongodb::bson::oid::ObjectId;
 //! # use serde::{Deserialize, Serialize};
-//! # async fn run() -> mongodb::error::Result<()> {
-//! # let mongo = mongo();
 //! // Define an entity
 //! #[derive(Serialize, Deserialize, Entity, Debug, PartialEq, Eq)]
-//! #[entity(skip_schema_validation, collection = "readme_user", projections(Profile(id, email, password)))]
+//! #[entity(
+//!   skip_schema_validation,
+//!   collection = "readme_user",
+//!   // Define supported projections; respective structs are generated automatically.
+//!   projections(Profile(id, email, password))
+//! )]
 //! struct User {
 //!   #[serde(rename = "_id")]
 //!   id: ObjectId,
@@ -21,6 +46,7 @@
 //!   password: String,
 //! }
 //!
+//! # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
 //! // Insert an entity into the database
 //! let user = User {
 //!   id: ObjectId::new(),
@@ -31,38 +57,43 @@
 //! let user_id = user.id;
 //!
 //! user.insert(mongo).await?;
+//! assert_eq!(User::find_one(mongo, by_id(user_id)).await?, Some(user));
 //!
-//! // Select an entity by id
+//! // Query an entity by id
 //! let person: User = User::find_one(mongo, by_id(user_id)).await?.unwrap();
-//! # assert_eq!(person.email, "mail@example.com");
+//! assert_eq!(person.email, "mail@example.com");
 //!
-//! // Select an entity by custom fields
+//! // Query an entity by custom fields
 //! let recent_user: User = User::find_one(mongo, user::filter! {
 //!   username: "nikis05"
 //! }).await?.unwrap();
-//! # assert_eq!(recent_user.id, user_id);
+//! assert_eq!(recent_user.id, user_id);
 //!
-//! // Select only necessary fields (email, password) of entity
-//! let profile: user::Profile = user::Profile::find_one(mongo, by_id(user_id)).await?.unwrap();
-//! # assert_eq!(profile.password, "somepassword");
+//! // Query only the necessary fields of an entity
+//! // into a custom projection struct
+//! let user::Profile { email, password, .. } = user::Profile::find_one(mongo, by_id(user_id)).await?.unwrap();
+//! assert_eq!(email, "mail@example.com");
+//! assert_eq!(password, "somepassword");
 //!
 //! // Update an entity in the database
 //! User::update_one(mongo, by_id(user_id), user::update! {
 //!   email: "new.email@example.com".into()
 //! }).await?;
-//! # assert_eq!(User::find_one(mongo, by_id(user_id)).await?.unwrap().email, "new.email@example.com");
+//! assert_eq!(User::find_one(mongo, by_id(user_id)).await?.unwrap().email, "new.email@example.com");
 //!
-//! // Update an entity in the database (struct is automatically updated)
+//! // Update an entity in the database and the corresponding struct
 //! let mut user = User::find_one(mongo, by_id(user_id)).await?.unwrap();
 //! user.patch(mongo, user::update! {
 //!   email: "newer.email@example.com".into(),
 //!   password: "someotherpassword".into()
 //! }).await?;
-//! # assert_eq!(user.password, "someotherpassword");
+//! assert_eq!(User::find_one(mongo, by_id(user_id)).await?.unwrap().password, "someotherpassword");
+//! assert_eq!(user.password, "someotherpassword");
 //!
-//! // Delete entities matching the filter
+//! // Delete one entity matching the filter
 //! let result = User::delete_one(mongo, by_id(user_id)).await?;
-//! # assert!(result.deleted());
+//! assert!(result.deleted());
+//! assert!(User::find_one(mongo, by_id(user_id)).await?.is_none());
 //!
 //! // Remove a document from the database that corresponds to an instance
 //! let removable = User {
@@ -74,13 +105,22 @@
 //! let removable_id = removable.id;
 //! removable.insert(mongo).await?;
 //! removable.remove(mongo).await?;
-//! # assert!(User::find_one(mongo, by_id(removable_id)).await?.is_none());
+//! assert!(User::find_one(mongo, by_id(removable_id)).await?.is_none());
 //! # Ok(())
 //! # }
-//! # RUNTIME.block_on(run()).unwrap();
+//! # fn main() {
+//! # RUNTIME.block_on(run(mongo())).unwrap();
+//! # }
 //! ```
 //!
 //! See [`guides`] module to learn more!
+//!
+//! ## Crate features
+//! - `meta` - enables Khan to manage collection indexes and expression-based validation rules.
+//! - `schema` - enables generation of `MongoDB` JSON Schema validation rules. Participating entities must
+//!   derive [`JsonSchema`] and use [BSON-compatible types](crate::types). Individual entities can opt out with
+//!   `#[entity(skip_schema_validation)]`. Apply generated rules with [`meta::enforce_validation`].
+//! - `guides` - internal feature for documentation purposes.
 
 #![warn(clippy::pedantic, missing_docs)]
 #![allow(
@@ -106,24 +146,34 @@ pub use indexmap::{self, IndexMap};
 pub use khan_macros::{__private__construct_filter, __private__construct_update};
 pub use khan_macros::{Entity, Fields};
 pub use mongodb;
+#[cfg(feature = "schema")]
+pub use schemars::{self, JsonSchema};
 
 #[cfg(any(doctest, test))]
 extern crate self as khan;
 
 /// High-level usage guides for Khan, covering core concepts like CRUD, filters, projections, transactions,
 /// and design patterns. Start here.
+#[cfg(feature = "guides")]
 pub mod guides;
 /// Tools for managing indexes and validation rules on collections.
 ///
 /// Enabled with the `meta` feature.
 #[cfg(feature = "meta")]
 pub mod meta;
+/// Convenient imports for Khan's common entity and database operations.
+///
+/// This deliberately small prelude exports [`Entity`], [`Selectable`], [`SelectableWithId`], and
+/// [`DatabaseExt`]. Filters, updates, builders, result wrappers, and helper functions remain explicit imports.
+pub mod prelude {
+    pub use crate::{DatabaseExt, Entity, Selectable, SelectableWithId};
+}
 #[cfg(any(doctest, test))]
 #[doc(hidden)]
 pub mod test_support;
 /// BSON-compatible types for use with JSON Schema validation.
 ///
-/// These types serve as drop-in replacements for BSON types that are not  supported by `MongoDB`'s JSON Schema
+/// These types serve as drop-in replacements for BSON types that are not supported by `MongoDB`'s JSON Schema
 /// implementation.
 ///
 /// Enabled with the `schema` feature.
@@ -140,8 +190,9 @@ pub mod types;
 /// Types that derive `Entity`:
 /// - must also derive [`Serialize`] and [`Deserialize`](serde::Deserialize),
 /// - must have a field named `id` with `#[serde(rename = "_id")]`,
-/// - the type of the `id` field must implement [`Copy`], and be serializable /
-///   deserializable to / from [`ObjectId`](mongodb::bson::oid::ObjectId).
+/// - the type of the `id` field must implement [`Clone`] + [`Send`] + `'static`,
+///   and be serializable / deserializable to / from
+///   [`ObjectId`](mongodb::bson::oid::ObjectId).
 pub trait Entity: SelectableWithId<Self> + Serialize {
     /// Type of the entity’s primary key (`id` field).
     ///
@@ -154,13 +205,13 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     /// This type is automatically generated when you derive `Entity`, and includes
     /// all fields in the struct.
     ///
-    /// You can access it as `helper_module::Fields`, where `helper_module` is the lowercase name of the
+    /// You can access it as `helper_module::Fields`, where `helper_module` is the `snake_case` name of the
     /// entity (e.g. `user::Fields` for `User`).
     type Fields: Display + Send + Eq + Hash + 'static;
 
     /// Name of the `MongoDB` collection this entity is stored in.
     ///
-    /// By default, this is the lowercase name of the struct (e.g. `"user"` for `User`). If the entity name
+    /// By default, this is the `snake_case` name of the struct (e.g. `"audit_log"` for `AuditLog`). If the name
     /// ends with an `Entity` suffix, e.g. `UserEntity`, that suffix is stripped.
     ///
     /// You can override it using the `#[entity(collection = "...")]` attribute.
@@ -234,8 +285,8 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
         .boxed()
     }
 
-    /// Like [`insert`](Entity::insert), but returns a [`Fence<Self>`] to indicate the document is protected
-    /// by this transaction.
+    /// Like [`insert`](Entity::insert), but returns a [`Fence<Self>`] to indicate that the document was inserted
+    /// in this transaction.
     ///
     /// Because the document is newly inserted within the same transaction, it is not visible to other
     /// operations until the transaction commits.
@@ -274,7 +325,7 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     }
 
     /// Like [`insert_many`](Entity::insert_many), but returns a `Vec<Fence<Self>>` to indicate that all
-    /// inserted documents are protected by this transaction.
+    /// documents were inserted in this transaction.
     ///
     /// Because the documents are newly inserted within the same transaction, they are not visible to other
     /// operations until the transaction commits.
@@ -424,11 +475,11 @@ pub trait Entity: SelectableWithId<Self> + Serialize {
     }
 }
 
-/// Trait for types that represent a partial view (projection) of an entity.
+/// Trait that represents either a complete entity or a partial projection of it.
 ///
 /// A `Selectable` defines which fields to include when querying documents from `MongoDB`. It is implemented
 /// automatically for projection structs declared via the `#[entity(projections(...))]` attribute, and for the
-/// entity itself (as the full projection).
+/// entity itself.
 ///
 /// This trait is automatically derived — manual implementation is not required.
 pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
@@ -532,7 +583,7 @@ pub trait Selectable<E: Entity>: DeserializeOwned + Send + Sync + 'static {
         Self::find_with_opts(mongo, filter, FindOptions::new())
     }
 
-    /// Finds the first document matching the given filter and returns it  as this projection type, or `None`
+    /// Finds the first document matching the given filter and returns it as this projection type, or `None`
     /// if no document matches.
     fn find_one<'a>(
         mut mongo: impl Mongo + 'a,
@@ -689,7 +740,7 @@ impl<E: Entity> Default for FindOptions<E> {
 /// Projections implementing this trait can be updated and deleted using convenience methods like
 /// [`patch`](SelectableWithId::patch) and [`remove`](SelectableWithId::remove).
 ///
-/// This trait is automatically implemented for projections declared with `id`  as one of their fields, as well
+/// This trait is automatically implemented for projections declared with `id` as one of their fields, as well
 /// as for the entity itself.
 pub trait SelectableWithId<E: Entity>: Selectable<E> {
     /// Returns the value of the document’s `id` field.
@@ -749,7 +800,7 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
     }
 }
 
-/// Extension methods for [`Database`] that integrate it with Khan.
+/// Convenience methods for running transactions.
 pub trait DatabaseExt {
     /// Runs a sequence of operations inside a `MongoDB` transaction.
     ///
@@ -868,9 +919,9 @@ impl DatabaseExt for Database {
     }
 }
 
-/// A `MongoDB` database context, optionally paired with a transaction session.
+/// A `MongoDB` database, optionally paired with a transaction session.
 ///
-/// Khan operations accept any `Send` implementor of this trait. Use [`Database`] or `&Database` for normal
+/// Khan operations accept implementors of this trait. Use [`Database`] or `&Database` for normal
 /// operations, or `(&Database, &mut ClientSession)` when working with a raw driver session.
 pub trait Mongo: Send {
     /// Returns the underlying `MongoDB` database.
@@ -916,8 +967,8 @@ impl<T: Mongo + ?Sized> Mongo for &mut T {
 
 /// A `MongoDB` database context with an active transaction session.
 ///
-/// Locking APIs require this stronger trait instead of plain [`Mongo`] so they cannot be called outside a
-/// transaction by accident.
+/// Fencing APIs require this stronger trait instead of plain [`Mongo`] so they cannot be called outside a
+/// transaction by accident. See [transactions and fencing](crate::guides::c4_transactions_and_fencing).
 pub trait Transaction: Mongo {
     /// Returns the active transaction session.
     fn transaction_session(&mut self) -> &mut ClientSession;
@@ -936,6 +987,9 @@ impl<T: Transaction + ?Sized> Transaction for &mut T {
 }
 
 /// Applies a session to a `MongoDB` query if a session is present.
+///
+/// If `session` is `Some`, it calls `.session(session)` on the query;
+/// otherwise, it returns the query unchanged.
 ///
 /// This macro is used to conditionally attach a transactional session to a query or command:
 ///
@@ -957,9 +1011,7 @@ impl<T: Transaction + ?Sized> Transaction for &mut T {
 /// let result = with_session!(Query { used_session: false }, Option::<&mut Session>::None);
 /// assert!(!result.used_session);
 /// ```
-///
-/// If `session` is `Some`, it calls `.session(session)` on the query;
-/// otherwise, it returns the query unchanged.
+#[doc(hidden)]
 #[macro_export]
 macro_rules! with_session {
     ($query: expr, $session: expr) => {
@@ -972,7 +1024,7 @@ macro_rules! with_session {
 
 /// Trait representing a `MongoDB` query filter for a given entity type.
 ///
-/// This trait is implemented by both typed filters (e.g. `TypedFilter`) and untyped filters
+/// This trait is implemented by both typed filters (e.g. `entity::TypedFilter`) and untyped filters
 /// (e.g. `UntypedFilter`). It allows Khan methods to accept filters in a uniform way,
 /// while preserving type safety where possible.
 ///
@@ -987,8 +1039,16 @@ pub trait Filter<E>: Send {
 /// A simple filter that matches a document by its `id` field.
 ///
 /// It implements [`Filter<E>`] and generates a filter of the form `{ "_id": <id> }`.
+/// Constructed via [`by_id`].
 #[derive(Debug)]
 pub struct FilterById<E: Entity>(E::Id, PhantomData<E>);
+
+impl<E: Entity> FilterById<E> {
+    /// Returns the ID matched by this filter.
+    pub fn id(&self) -> &E::Id {
+        &self.0
+    }
+}
 
 /// Creates a filter that matches a document by its `id`.
 pub fn by_id<E: Entity>(id: E::Id) -> FilterById<E> {
@@ -1021,7 +1081,9 @@ impl<E: Send> Filter<E> for UntypedFilter<E> {
     }
 }
 
-/// Represents a typed `MongoDB` filter operator for a specific field.
+/// Represents a typed `MongoDB`
+/// [comparison operator](https://www.mongodb.com/docs/manual/reference/operator/query/#comparison)
+/// for a specific field.
 ///
 /// This enum is used internally by Khan’s `TypedFilter` structs, and is also supported by the `filter!`
 /// macro generated for each entity.
@@ -1111,7 +1173,7 @@ impl<E: Send> Update<E> for UntypedUpdate<E> {
 
 /// Trait for applying an update to an in-memory projection.
 ///
-/// This is used by methods like [`patch`](SelectableWithId::patch) to ensure that the changes applied to the
+/// This is used by [`patch`](SelectableWithId::patch) to ensure that the changes applied to the
 /// database are also reflected in the local struct.
 ///
 /// It is typically implemented automatically for typed updates, or provided via a closure when using
@@ -1199,6 +1261,8 @@ impl<T> Field<T> {
 
 /// A type-level marker indicating that a document has been fenced in the current transaction.
 ///
+/// See [transactions and fencing](crate::guides::c4_transactions_and_fencing).
+///
 /// A fence is not a mutex or SQL-style row lock. It means the transaction has written the referenced document
 /// or inserted it, so a conflicting concurrent write/delete detected by `MongoDB` will prevent this
 /// transaction from committing successfully.
@@ -1237,13 +1301,7 @@ impl<T> std::ops::Deref for Fence<T> {
     }
 }
 
-impl<T> std::ops::DerefMut for Fence<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-/// A wrapper around `mongodb::results::UpdateResult` that represents the result of an update operation on a
+/// A wrapper around [`mongodb::results::UpdateResult`] that represents the result of an update operation on a
 /// `MongoDB` collection.
 #[repr(transparent)]
 #[derive(Debug)]
@@ -1289,7 +1347,7 @@ impl std::ops::Deref for UpdateResult {
     }
 }
 
-/// A wrapper around `mongodb::results::DeleteResult`, representing
+/// A wrapper around [`mongodb::results::DeleteResult`], representing
 /// the outcome of a delete operation.
 #[repr(transparent)]
 #[derive(Debug)]
@@ -1328,11 +1386,19 @@ impl std::ops::Deref for DeleteResult {
 fn merge_fence_into_update<E>(update: &impl Update<E>) -> Result<UntypedUpdate<E>> {
     let mut document = update.to_document()?;
 
-    let inc_operator = document
+    let inc_value = document
         .entry("$inc".into())
-        .or_insert_with(|| doc! {}.into())
-        .as_document_mut()
-        .ok_or_else(|| mongodb::error::Error::custom("`$inc` operator value must be an object"))?;
+        .or_insert_with(|| doc! {}.into());
+
+    let inc_operator = match inc_value {
+        Bson::Document(document) => document,
+        value => {
+            return Err(mongodb::error::Error::custom(format!(
+                "the value of $inc operator must be an object, but your update supplies {:?} instead",
+                value.element_type()
+            )));
+        }
+    };
 
     inc_operator.insert("__fence", 1);
 

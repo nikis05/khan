@@ -2,7 +2,7 @@ use syn::ItemFn;
 
 use crate::prelude::*;
 
-pub fn attr_async_test(attrs: TokenStream, input: TokenStream) -> Result<TokenStream> {
+pub fn attr_async_test(attrs: &TokenStream, input: TokenStream) -> Result<TokenStream> {
     if !attrs.is_empty() {
         return Err(Error::new(
             attrs.span(),
@@ -41,9 +41,9 @@ fn build(mut fun_without_asyncness: ItemFn) -> TokenStream {
 }
 
 #[test]
-fn foo() {
+fn wraps_async_test_in_runtime() {
     let out = attr_async_test(
-        quote! {},
+        &quote! {},
         quote! {
             async fn works_when_doesnt_exist() {
                 let name = fakeit::name::full();
@@ -61,5 +61,25 @@ fn foo() {
         },
     )
     .unwrap();
-    assert_eq!(out.to_string(), "");
+
+    let expected = quote! {
+        #[test]
+        fn works_when_doesnt_exist() {
+            crate::utils::RUNTIME.block_on(async {
+                let name = fakeit::name::full();
+                assert!(
+                    !User::exists(
+                        (&get_database()).into(),
+                        user::filter! {
+                            name: &name
+                        },
+                    )
+                    .await
+                    .unwrap()
+                );
+            });
+        }
+    };
+
+    assert_eq!(out.to_string(), expected.to_string());
 }

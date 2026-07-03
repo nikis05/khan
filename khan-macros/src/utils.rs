@@ -26,7 +26,7 @@ pub fn extract_named_fields(span: Span, data: Data) -> Result<FieldsNamed> {
 #[allow(clippy::needless_continue)]
 pub fn extract_serde_rename(field: &Field) -> Option<String> {
     #[derive(FromAttributes)]
-    #[darling(attributes(serde))]
+    #[darling(attributes(serde), allow_unknown_fields)]
     struct SerdeAttribute {
         rename: String,
     }
@@ -103,5 +103,20 @@ pub fn mongodb() -> TokenStream {
             let crate_ident = Ident::new(&name, Span::call_site());
             quote! { #crate_ident::mongodb }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_rename_alongside_other_serde_attributes() {
+        let field: Field = parse_quote! {
+            #[serde(rename = "postalCode", default)]
+            postal_code: String
+        };
+
+        assert_eq!(extract_serde_rename(&field).as_deref(), Some("postalCode"));
     }
 }

@@ -22,7 +22,7 @@ struct Attributes {
     indexes: HashMap<Ident, IndexAttributes>,
     #[cfg(feature = "meta")]
     #[darling(default)]
-    untyped_indexes: Punctuated<Expr, Token![,]>,
+    untyped_indexes: UntypedIndexes,
     #[cfg(feature = "meta")]
     #[darling(default)]
     query_validation: Option<Expr>,
@@ -40,6 +40,25 @@ struct IndexAttributes {
 
 #[cfg(feature = "meta")]
 struct IndexKeys(IndexMap<Ident, i8>);
+
+#[cfg(feature = "meta")]
+#[derive(Default)]
+struct UntypedIndexes(Punctuated<Expr, Token![,]>);
+
+#[cfg(feature = "meta")]
+impl FromMeta for UntypedIndexes {
+    fn from_meta(item: &syn::Meta) -> darling::Result<Self> {
+        let syn::Meta::List(list) = item else {
+            return Err(
+                darling::Error::custom("expected `untyped_indexes(index, ...)`").with_span(item),
+            );
+        };
+
+        list.parse_args_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+            .map(Self)
+            .map_err(Into::into)
+    }
+}
 
 #[cfg(feature = "meta")]
 impl FromMeta for IndexKeys {
@@ -227,7 +246,7 @@ pub fn derive_entity(item: TokenStream) -> Result<TokenStream> {
         #[cfg(feature = "meta")]
         &indexes,
         #[cfg(feature = "meta")]
-        attributes.untyped_indexes.iter(),
+        attributes.untyped_indexes.0.iter(),
         #[cfg(feature = "meta")]
         attributes.query_validation.as_ref(),
         #[cfg(all(feature = "meta", feature = "schema"))]

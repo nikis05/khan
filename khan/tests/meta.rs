@@ -95,10 +95,14 @@ mod indexes {
     #[entity(
         skip_schema_validation,
         indexes(__(keys(email = 1, password = "-1")),),
-        untyped_indexes = r#"
-          IndexModel::builder().keys(doc! { user3::Fields::Email: 1 }).build(),
-          IndexModel::builder().keys(doc! { user3::Fields::Password: 1 }).build()
-        "#
+        untyped_indexes(
+            IndexModel::builder()
+                .keys(doc! { user3::Fields::Email: 1 })
+                .build(),
+            IndexModel::builder()
+                .keys(doc! { user3::Fields::Password: 1 })
+                .build()
+        )
     )]
     struct User3 {
         #[serde(rename = "_id")]

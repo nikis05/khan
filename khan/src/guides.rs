@@ -9,12 +9,12 @@
 /// - implement [`Serialize`](serde::Serialize) and [`Deserialize`](serde::Deserialize)
 /// - have a field named `id`, annotated with `#[serde(rename = "_id")]`
 /// - use a type for `id` that can be serialized to and deserialized from
-///   [`ObjectId`](mongodb::bson::oid::ObjectId).
+///   [`ObjectId`](mongodb::bson::oid::ObjectId), and implement `Clone + Send + 'static`.
 ///
 /// The type of the `id` field may be [`ObjectId`](mongodb::bson::oid::ObjectId) itself,
 /// or a newtype wrapper around it. See
-/// [this note](https://docs.rs/khan/latest/khan/guides/patterns_and_recommendations/index.html#use-newtypes-for-ids)
-/// for why using a newtype might be a good idea.
+/// [this note](https://docs.rs/khan/latest/khan/guides/c5_patterns_and_recommendations/index.html#use-newtypes-for-ids)
+/// on why using a newtype might be a good idea.
 ///
 /// ## Example
 ///
@@ -35,8 +35,8 @@
 /// ```
 ///
 /// Once you derive [`Entity`](crate::Entity) for a type, Khan will map it to a `MongoDB`
-/// collection. By default, the collection name is the lowercase form of the struct name
-/// (e.g., `User` → `user`). You can override this using the
+/// collection. By default, the collection name is the `snake_case` form of the struct name
+/// (e.g., `AuditLog` becomes `audit_log`). You can override this using the
 /// `#[entity(collection = "custom_name")]` attribute.
 ///
 /// You can then use methods from the [`Entity`](crate::Entity),
@@ -52,9 +52,9 @@
 /// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
 /// let user = User {
 ///   id: ObjectId::new(),
-/// #   email: test_support::unique("kit@example.com"),
-/// #   avatar_url: "https://example.com/kit.png".into(),
-///   name: "Kit Isaev".into(),
+/// #   email: test_support::unique("john@example.com"),
+/// #   avatar_url: "https://example.com/john.png".into(),
+///   name: "John Doe".into(),
 ///   password: "somepassword".into(),
 /// #   index: 0.into(),
 /// };
@@ -62,7 +62,7 @@
 ///
 ///
 /// // Equivalent to:
-/// // db.user.insertOne({ _id: user.id, name: "Kit Isaev", password: "somepassword" })
+/// // db.user.insertOne({ _id: user.id, name: "John Doe", password: "somepassword" })
 /// user.insert(mongo).await?;
 ///
 /// // Equivalent to:
@@ -84,8 +84,8 @@
 ///
 /// [`Mongo`](crate::Mongo) is the trait Khan uses for database access. It is
 /// implemented for [`&Database`](mongodb::Database), optionally paired with a
-/// mutable reference to a [`mongodb::ClientSession`](mongodb::ClientSession) for use in
-/// [transactions](super::transactions_and_fencing).
+/// mutable reference to a [`mongodb::ClientSession`] for use in
+/// [transactions](c4_transactions_and_fencing).
 ///
 /// It is accepted by all Khan operations and can be supplied from a
 /// [`Database`](mongodb::Database) instance:
@@ -108,7 +108,7 @@
 /// # #[path = "test_support.rs"] mod test_support;
 /// # use test_support::{RUNTIME, User, mongo, user};
 /// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
-/// # let email = test_support::unique("kit@example.com");
+/// # let email = test_support::unique("john@example.com");
 /// # let mut seed = test_support::user();
 /// # seed.email = email.clone();
 /// # seed.insert(mongo).await?;
@@ -128,23 +128,23 @@
 ///
 /// ## Method overview
 ///
-/// | Method name                       | Description                                                                      | Example                                                                                                 | Corresponding MongoDB Query                                                                   |  
-/// |-----------------------------------|----------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|  
-/// | `Entity::insert`                  | Inserts a new entity into the database.                                          | `User { id, name: "Kit".into(), password: "pass".into() }.insert(mongo).await?;`                        | `db.collection('user').insertOne({ _id: id, name: "Kit", password: "pass" });`                |  
-/// | `Entity::insert_many`             | Inserts multiple entities into the database.                                     | `User::insert_many(mongo, &[User { id, name: "Kit".into(), password: "pass".into() }]).await?;`         | `db.collection('user').insertMany([{ _id: id, name: "Kit", password: "pass" }]);`             |
-/// | `Entity::count`                   | Counts entities matching a filter.                                               | `User::count(mongo, user::filter! { name: "Kit" }).await?;`                                             | `db.collection('user').count({ name: { $eq: "Kit" } });`                                      |
-/// | `Entity::exists`                  | Returns true if at least one entity matches the filter.                          | `User::exists(mongo, user::filter! { name: "Kit" }).await?;`                                            | `db.collection('user').count({ name: { $eq: "Kit" } });`                                      |
-/// | `Selectable::find`                | Finds entities based on a filter.                                                | `User::find(mongo, user::filter! { name: "Kit" }).await?;`                                              | `db.collection('user').find({ name: { $eq: "Kit" } });`                                       |  
-/// | `Selectable::find_one`            | Finds a single entity based on a filter.                                         | `User::find_one(mongo, by_id(id)).await?;`                                                              | `db.collection('user').findOne({ _id: { $eq: id } });`                                        |
-/// | `Selectable::find_with_opts`      | Finds entities with options for skip, limit, and sorting.                        | `User::find_with_opts(mongo, user::filter! { name: "Kit" }, FindOptions::new().skip(10).limit(20)).await?;` | `db.collection('user').find({ name: { $eq: "Kit" } }).skip(10).limit(20);`                 |  
-/// | `Selectable::find_one_and_update` | Finds and updates a single entity, returning the pre-update document.            | `User::find_one_and_update(mongo, by_id(id), user::update! { name: "Kit".into() }).await?;`             | `db.collection('user').findOneAndUpdate({ _id: id }, { $set: { name: "Kit" } });`             |
-/// | `Entity::update`                  | Updates multiple documents based on a filter.                                    | `User::update(mongo, user::filter! { name: "Kit" }, user::update! { password: "pass".into() }).await?;` | `db.collection('user').updateMany({ name: { $eq: "Kit" } }, { $set: { password: "pass" } });` |  
-/// | `Entity::update_one`              | Updates a single document based on a filter.                                     | `Entity::update_one(mongo, by_id(id), user::update! { password: "pass".into() }).await?;`               | `db.collection('user').updateOne({ _id: { $eq: id } }, { $set: { password: "pass" } });`      |
-/// | `SelectableWithId::patch`         | Applies a patch to an existing document based on its id, and updates the struct. | `user.patch(mongo, user::update! { password: "pass".into() }).await?;`                                  | `db.collection('user').updateOne({ _id: { $eq: user.id } }, { $set: { password: "pass" } });` |
-/// | `Entity::delete`                  | Deletes multiple documents based on a filter.                                    | `User::delete(mongo, user::filter! { name: "Kit" }).await?;`                                            | `db.collection('user').deleteMany({ name: { $eq: "Kit" } });`                                 |  
-/// | `Entity::delete_one`              | Deletes a single document based on a filter.                                     | `Entity::delete_one(mongo, by_id(id)).await?;`                                                          | `db.collection('user').deleteOne({ _id: { $eq: id } });`                                      |  
-/// | `SelectableWithId::remove`        | Removes an existing entity from the database by id.                              | `user.remove(mongo).await?;`                                                                            | `db.collection('user').deleteOne({ _id: { $eq: user.id } });`                                 |
-pub mod getting_started {}
+/// | Method name                       | Description                                                                      | Example                                                                                                 | Corresponding MongoDB Query                                                                     |
+/// |-----------------------------------|----------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
+/// | `Entity::insert`                  | Inserts a new entity into the database.                                          | `User { id, name: "John".into(), password: "pass".into() }.insert(mongo).await?;`                        | `db.collection('user').insertOne({ _id: id, name: "John", password: "pass" });`                |
+/// | `Entity::insert_many`             | Inserts multiple entities into the database.                                     | `User::insert_many(mongo, &[User { id, name: "John".into(), password: "pass".into() }]).await?;`         | `db.collection('user').insertMany([{ _id: id, name: "John", password: "pass" }]);`             |
+/// | `Entity::count`                   | Counts entities matching a filter.                                               | `User::count(mongo, user::filter! { name: "John" }).await?;`                                             | `db.collection('user').count({ name: { $eq: "John" } });`                                      |
+/// | `Entity::exists`                  | Returns true if at least one entity matches the filter.                          | `User::exists(mongo, user::filter! { name: "John" }).await?;`                                            | `db.collection('user').count({ name: { $eq: "John" } });`                                      |
+/// | `Selectable::find`                | Finds entities based on a filter.                                                | `User::find(mongo, user::filter! { name: "John" }).await?;`                                              | `db.collection('user').find({ name: { $eq: "John" } });`                                       |
+/// | `Selectable::find_one`            | Finds a single entity based on a filter.                                         | `User::find_one(mongo, by_id(id)).await?;`                                                              | `db.collection('user').findOne({ _id: { $eq: id } });`                                          |
+/// | `Selectable::find_with_opts`      | Finds entities with options for skip, limit, and sorting.                        | `User::find_with_opts(mongo, user::filter! { name: "John" }, FindOptions::new().skip(10).limit(20)).await?;` | `db.collection('user').find({ name: { $eq: "John" } }).skip(10).limit(20);`                |
+/// | `Selectable::find_one_and_update` | Finds and updates a single entity, returning the pre-update document.            | `User::find_one_and_update(mongo, by_id(id), user::update! { name: "John".into() }).await?;`             | `db.collection('user').findOneAndUpdate({ _id: id }, { $set: { name: "John" } });`             |
+/// | `Entity::update`                  | Updates multiple documents based on a filter.                                    | `User::update(mongo, user::filter! { name: "John" }, user::update! { password: "pass".into() }).await?;` | `db.collection('user').updateMany({ name: { $eq: "John" } }, { $set: { password: "pass" } });` |
+/// | `Entity::update_one`              | Updates a single document based on a filter.                                     | `Entity::update_one(mongo, by_id(id), user::update! { password: "pass".into() }).await?;`               | `db.collection('user').updateOne({ _id: { $eq: id } }, { $set: { password: "pass" } });`        |
+/// | `SelectableWithId::patch`         | Applies a patch to an existing document based on its id, and updates the struct. | `user.patch(mongo, user::update! { password: "pass".into() }).await?;`                                  | `db.collection('user').updateOne({ _id: { $eq: user.id } }, { $set: { password: "pass" } });`   |
+/// | `Entity::delete`                  | Deletes multiple documents based on a filter.                                    | `User::delete(mongo, user::filter! { name: "John" }).await?;`                                            | `db.collection('user').deleteMany({ name: { $eq: "John" } });`                                 |
+/// | `Entity::delete_one`              | Deletes a single document based on a filter.                                     | `Entity::delete_one(mongo, by_id(id)).await?;`                                                          | `db.collection('user').deleteOne({ _id: { $eq: id } });`                                        |
+/// | `SelectableWithId::remove`        | Removes an existing entity from the database by id.                              | `user.remove(mongo).await?;`                                                                            | `db.collection('user').deleteOne({ _id: { $eq: user.id } });`                                   |
+pub mod c1_getting_started {}
 
 /// # Filters and updates
 ///
@@ -240,18 +240,18 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let filter = user::TypedFilter {
-///     name: Field::Set(FilterOperator::Eq("Kit")),
-///     ..Default::default()
+///     name: Field::Set(FilterOperator::Eq("John")),
+///     ..Default::default() // or `id: Field::Omit`
 /// };
 ///
-/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "John" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// Equivalent `MongoDB` query:
 ///
 /// ```mongodb
-/// db.user.findOne({ name: { $eq: "Kit" } });
+/// db.user.findOne({ name: { $eq: "John" } });
 /// ```
 ///
 /// ```
@@ -260,18 +260,18 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let update = user::TypedUpdate {
-///     name: Field::Set("K.I.".to_string()),
-///     ..Default::default()
+///     name: Field::Set("J.D.".to_string()),
+///     ..Default::default() // or `id: Field::Omit`
 /// };
 ///
-/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "K.I." } });
+/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "J.D." } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
 /// Equivalent `MongoDB` update:
 ///
 /// ```mongodb
-/// db.user.updateOne({ name: { $eq: "Kit" } }, { $set: { name: "K.I." } });
+/// db.user.updateOne({ name: { $eq: "John" } }, { $set: { name: "J.D." } });
 /// ```
 ///
 /// ### Helper macros
@@ -285,10 +285,10 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let filter = user::filter! {
-///     name: "Kit"
+///     name: "John"
 /// };
 ///
-/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "John" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -299,11 +299,11 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let filter = user::TypedFilter {
-///     name: Field::Set(FilterOperator::Eq("Kit")),
+///     name: Field::Set(FilterOperator::Eq("John")),
 ///     ..Default::default()
 /// };
 ///
-/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$eq": "John" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -317,10 +317,10 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let filter = user::filter! {
-///     name: Ne("Kit")
+///     name: Ne("John")
 /// };
 ///
-/// assert_eq!(filter.to_document()?, doc! { "name": { "$ne": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$ne": "John" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -331,11 +331,11 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let filter = user::TypedFilter {
-///     name: Field::Set(FilterOperator::Ne("Kit")),
+///     name: Field::Set(FilterOperator::Ne("John")),
 ///     ..Default::default()
 /// };
 ///
-/// assert_eq!(filter.to_document()?, doc! { "name": { "$ne": "Kit" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$ne": "John" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -346,10 +346,10 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let update = user::update! {
-///     name: "Kit".to_string()
+///     name: "John".to_string()
 /// };
 ///
-/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "Kit" } });
+/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "John" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -360,11 +360,11 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let update = user::TypedUpdate {
-///     name: Field::Set("Kit".to_string()),
+///     name: Field::Set("John".to_string()),
 ///     ..Default::default()
 /// };
 ///
-/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "Kit" } });
+/// assert_eq!(update.to_document()?, doc! { "$set": { "name": "John" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -383,13 +383,15 @@ pub mod getting_started {}
 /// ```
 /// # use khan::{Filter, UntypedFilter};
 /// # use khan::mongodb::bson::{self, doc};
-/// let filter: UntypedFilter<()> = UntypedFilter::new(bson::doc! {
+/// #[path = "test_entities.rs"] mod test_support;
+/// # use test_support::User;
+/// let filter: UntypedFilter<User> = UntypedFilter::new(bson::doc! {
 ///     "name": {
-///         "$regex": "^Kit$"
+///         "$regex": "^John$"
 ///     }
 /// });
 ///
-/// assert_eq!(filter.to_document()?, doc! { "name": { "$regex": "^Kit$" } });
+/// assert_eq!(filter.to_document()?, doc! { "name": { "$regex": "^John$" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -401,12 +403,12 @@ pub mod getting_started {}
 /// # use khan::{UntypedUpdate, Update};
 /// # use khan::mongodb::bson::{self, oid::ObjectId};
 /// # #[path = "test_entities.rs"] mod test_support;
-/// # use test_support::Comment;
+/// # use test_support::{Post, Comment};
 /// # let comment = bson::to_bson(&Comment {
 /// #     id: ObjectId::new(),
 /// #     text: "hi".into(),
 /// # }).unwrap();
-/// let update: UntypedUpdate<()> = UntypedUpdate::new(bson::doc! {
+/// let update: UntypedUpdate<Post> = UntypedUpdate::new(bson::doc! {
 ///     "$push": {
 ///         "comments": { "$each": [comment.clone()], "$slice": -10 }
 ///     }
@@ -434,10 +436,10 @@ pub mod getting_started {}
 /// # use khan::{Filter, UntypedFilter};
 /// # use khan::mongodb::bson;
 /// let filter: UntypedFilter<()> = UntypedFilter::new(bson::doc! {
-///     "name": { "$regex": "^Kit$" }
+///     "name": { "$regex": "^John$" }
 /// });
 ///
-/// assert_eq!(filter.to_document()?, bson::doc! { "name": { "$regex": "^Kit$" } });
+/// assert_eq!(filter.to_document()?, bson::doc! { "name": { "$regex": "^John$" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -449,10 +451,10 @@ pub mod getting_started {}
 /// # #[path = "test_entities.rs"] mod test_support;
 /// # use test_support::user;
 /// let filter: UntypedFilter<()> = UntypedFilter::new(bson::doc! {
-///     user::Fields::Name: { "$regex": "^Kit$" }
+///     user::Fields::Name: { "$regex": "^John$" }
 /// });
 ///
-/// assert_eq!(filter.to_document()?, bson::doc! { "name": { "$regex": "^Kit$" } });
+/// assert_eq!(filter.to_document()?, bson::doc! { "name": { "$regex": "^John$" } });
 /// # Ok::<(), mongodb::error::Error>(())
 /// ```
 ///
@@ -497,7 +499,7 @@ pub mod getting_started {}
 /// ```
 ///
 /// This will remove the last comment from both the database and the local `post` instance.
-pub mod filters_and_updates {}
+pub mod c2_filters_and_updates {}
 
 /// # Projections
 ///
@@ -566,7 +568,7 @@ pub mod filters_and_updates {}
 /// # #[path = "test_support.rs"] mod test_support;
 /// # use test_support::{RUNTIME, mongo, user};
 /// # async fn run(mongo: &'static mongodb::Database) -> mongodb::error::Result<()> {
-/// # let name = test_support::unique("Kit");
+/// # let name = test_support::unique("John");
 /// # let mut seed = test_support::user();
 /// # seed.name = name.clone();
 /// # seed.insert(mongo).await?;
@@ -582,15 +584,18 @@ pub mod filters_and_updates {}
 /// # RUNTIME.block_on(run(mongo())).unwrap();
 /// ```
 ///
-pub mod projections {}
+pub mod c3_projections {}
 
 /// # Transactions and fencing
 ///
 /// All methods on [`Entity`](crate::Entity), [`Selectable`](crate::Selectable), and
 /// [`SelectableWithId`](crate::SelectableWithId) can be run in the context of a
-/// transaction. To do this, start a transaction using the regular
-/// [`mongodb` crate API](mongodb::ClientSession), then construct a [`Mongo`](crate::Mongo)
-/// instance using `(&Database, &mut ClientSession)` instead of just `&Database`:
+/// transaction. Transactions can be started using either the regular
+/// [`mongodb` crate API](mongodb::ClientSession) or Khan's [`DatabaseExt`](crate::DatabaseExt)
+/// helpers.
+///
+/// When using the driver API directly, construct a [`Mongo`](crate::Mongo) instance using
+/// `(&Database, &mut ClientSession)` instead of just `&Database`:
 ///
 /// ```ignore
 /// let client = Client::with_uri_str("mongodb://localhost:27017").await?;
@@ -602,7 +607,7 @@ pub mod projections {}
 ///     let mut mongo = (db, session);
 ///
 ///     let user = User::find_one(&mut mongo, user::filter! {
-///         email: "kit@example.com"
+///         email: "john@example.com"
 ///     }).await?;
 ///
 ///     if let Some(user) = user {
@@ -613,12 +618,49 @@ pub mod projections {}
 /// }).await?;
 /// ```
 ///
-/// ## Fencing
+/// As a more concise alternative, [`DatabaseExt::run_transaction2`](crate::DatabaseExt::run_transaction2)
+/// creates the session and supplies the transaction context:
 ///
-/// **Important:** a fence is not a mutex or SQL-style row lock. It works by performing a write
-/// to the referenced document inside the transaction so that `MongoDB` can detect conflicting
-/// concurrent writes. It does not stop other operations from running, and it does not provide
-/// predicate or range locking.
+/// ```ignore
+/// use khan::prelude::*;
+///
+/// db.run_transaction2(async |mut mongo| {
+///     let user = User::find_one(&mut mongo, user::filter! {
+///         email: "john@example.com"
+///     }).await?;
+///
+///     if let Some(user) = user {
+///         user.remove(&mut mongo).await?;
+///     }
+///
+///     Ok(())
+/// }).await?;
+/// ```
+///
+/// Use [`DatabaseExt::run_transaction`](crate::DatabaseExt::run_transaction) when values must be passed to
+/// the callback on every transaction attempt. The callback is retried with a mutable reference to its context:
+///
+/// ```ignore
+/// use futures_util::FutureExt;
+/// use khan::prelude::*;
+///
+/// db.run_transaction("john@example.com".to_owned(), |mut mongo, email| async move {
+///     let user = User::find_one(&mut mongo, user::filter! {
+///         email: email.as_str()
+///     }).await?;
+///
+///     if let Some(user) = user {
+///         user.remove(&mut mongo).await?;
+///     }
+///
+///     Ok(())
+/// }.boxed()).await?;
+/// ```
+///
+/// The fencing examples below use the driver syntax to show the session lifecycle explicitly, but either
+/// [`DatabaseExt`](crate::DatabaseExt) helper can be used instead.
+///
+/// ## Fencing
 ///
 /// Sometimes you want to make sure that a transaction does not commit based on a stale reference.
 /// For example, imagine you're inserting a `Comment` that references an existing `Post` by its ID.
@@ -931,7 +973,19 @@ pub mod projections {}
 ///     Ok(())
 /// }
 /// ```
-pub mod transactions_and_fencing {}
+///
+/// **Important:** a fence is not a mutex or SQL-style row lock. It works by performing a write
+/// to the referenced document inside the transaction so that `MongoDB` can detect conflicting
+/// concurrent writes. It does not stop other operations from running, and it does not provide
+/// predicate or range locking.
+///
+/// You should use this technique sparingly. Frequent write conflicts and transaction
+/// retries can lead to degraded performance. Instead, consider:
+/// - designing your schema such that related data is stored in the same document;
+/// - designing your app in a way that can work around inconsistency across documents;
+/// - implementing eventual consistency workflows, e.g. workers that asynchronously update
+///   all related documents after a document has been updated.
+pub mod c4_transactions_and_fencing {}
 
 /// # Patterns and Recommendations
 ///
@@ -944,7 +998,7 @@ pub mod transactions_and_fencing {}
 ///
 /// ## 1. Use newtypes instead of `ObjectId`
 ///
-/// Instead of using `ObjectId` directly in your entities, define a newtype wrapper:
+/// Instead of using `ObjectId` directly in your entities, define newtype wrappers:
 ///
 /// ```ignore
 /// #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
@@ -954,7 +1008,7 @@ pub mod transactions_and_fencing {}
 ///
 /// This helps avoid mixing up IDs of different entities and improves type safety across your codebase.
 ///
-/// You can still use this newtype as an `Entity::Id` type, and Khan will handle it like a regular `ObjectId`.
+/// You can use this newtype as an `Entity::Id` type, and Khan will handle it like a regular `ObjectId`.
 ///
 /// **NOT RECOMMENDED:**
 ///
@@ -1077,7 +1131,7 @@ pub mod transactions_and_fencing {}
 /// using crates like [`delegate`](https://crates.io/crates/delegate) or
 /// [`accessory`](https://crates.io/crates/accessory) to generate common forwarding logic.
 ///
-/// ## 3. Implement custom methods on entitiesx
+/// ## 3. Implement custom methods on entities
 ///
 /// Khan focuses on simple CRUD operations. It intentionally avoids covering more complex cases like:
 /// - updates on nested documents or arrays,
@@ -1131,7 +1185,7 @@ pub mod transactions_and_fencing {}
 /// ```
 ///
 /// This keeps your API clean and expressive, while giving you full control over how each operation behaves.
-pub mod patterns_and_recommendations {}
+pub mod c5_patterns_and_recommendations {}
 
 /// # Indexes and Schema Validation
 ///
@@ -1141,8 +1195,12 @@ pub mod patterns_and_recommendations {}
 /// ## Enabling metadata support
 ///
 /// To enable index and validation rule management:
-/// - Use the `meta` feature to enable index and query validation enforcement.
-/// - Use the `schema` feature to enable JSON Schema validation via the `schemars` crate.
+/// - Use the `meta` feature to enable index and
+///   [query validation](https://www.mongodb.com/docs/manual/core/schema-validation/specify-query-expression-rules/)
+///   enforcement.
+/// - Use the `schema` feature to enable
+///   [`MongoDB` JSON Schema validation](https://www.mongodb.com/docs/manual/core/schema-validation/specify-json-schema/)
+///   via the [`schemars`] crate.
 ///
 /// ## Defining indexes
 ///
@@ -1189,8 +1247,9 @@ pub mod patterns_and_recommendations {}
 /// ```
 ///
 /// Notes:
-/// - Use quoted strings for descending indexes: `keys(created_at = "-1")`.
-/// - If the index name is set to `__`, `MongoDB` will generate the name automatically.
+/// - Use `1` for ascending indexes and `-1` for descending indexes.
+/// - If the index name is set to `__`, Khan treats it as an unnamed index, and `MongoDB` will
+///   generate the name automatically.
 /// - To apply indexes to collections at runtime, call:
 ///   ```ignore
 ///   khan::meta::enforce_indexes(mongo).await?;
@@ -1198,7 +1257,9 @@ pub mod patterns_and_recommendations {}
 ///
 /// ## Query validation
 ///
-/// `MongoDB` supports per-collection validation rules that restrict allowed query shapes. You can declare
+/// `MongoDB` supports
+/// [per-collection validation rules](https://www.mongodb.com/docs/manual/core/schema-validation/specify-query-expression-rules/)
+/// that restrict allowed document writes. You can declare
 /// query validation rules using the `#[entity(query_validation = ...)]` attribute.
 ///
 /// ```ignore
@@ -1242,18 +1303,24 @@ pub mod patterns_and_recommendations {}
 ///
 /// ## JSON Schema validation
 ///
-/// If the `schema` feature is enabled, Khan will generate JSON Schema validation rules for all entities by
-/// default. You can disable it per-entity using:
+/// If the `schema` feature is enabled, Khan uses the [`schemars`] crate to generate
+/// [`MongoDB` JSON Schema validation rules](https://www.mongodb.com/docs/manual/core/schema-validation/specify-json-schema/).
+/// You can disable it per-entity using:
 /// ```ignore
 /// #[entity(skip_schema_validation)]
 /// ```
 ///
-/// Entities using schema validation must implement `schemars::JsonSchema`.
+/// Entities using schema validation must implement [`schemars::JsonSchema`].
+///
+/// Validation rules can be applied by calling:
+/// ```ignore
+/// khan::meta::enforce_validation(mongo).await?;
+/// ```
 ///
 /// ## BSON-compatible schema types
 ///
 /// MongoDB’s JSON Schema implementation does not support certain standard keywords, such as the `"integer"`
-/// type. To work around this, Khan provides BSON-compatible wrapper types in the `khan::types` module. Use
+/// type. To work around this, Khan provides BSON-compatible wrapper types in the [`types`](crate::types) module. Use
 /// these as drop-in replacements in any entity that uses JSON Schema validation:
 ///
 /// - `Int32` instead of `i32`
@@ -1269,8 +1336,8 @@ pub mod patterns_and_recommendations {}
 ///
 /// ## Use caution in production
 ///
-/// `enforce_indexes`, `enforce_validation`, and `enforce_schema` apply changes directly to your database,
-/// and may come in conflict with existing database state (e.g. existing named indexes). They are best suited
+/// `enforce_indexes` and `enforce_validation` apply changes directly to your database, and may
+/// come in conflict with existing database state (e.g. existing named indexes). They are best suited
 /// for development or simple use cases.
 ///
 /// For more advanced setups (e.g. production migrations), use the lower-level API:
@@ -1282,9 +1349,9 @@ pub mod patterns_and_recommendations {}
 /// }
 /// ```
 ///
-/// Each `EntityMetadata` item includes declared indexes and validation rules for one entity, giving you full
-/// control over how they're applied.
-pub mod indexes_and_schema_validation {}
+/// Each [`EntityMetadata`](crate::meta::EntityMetadata) item includes declared indexes
+/// and validation rules for one entity, giving you full control over how they're applied.
+pub mod c6_indexes_and_schema_validation {}
 
-/// This library is named "`khan`" because "Mongo" is a prefix to "Mongolia".
-pub mod naming {}
+/// This library is named "`khan`" after Genghis Khan, because "Mongo" is a prefix to "Mongolia".
+pub mod c7_naming {}

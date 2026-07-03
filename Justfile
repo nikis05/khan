@@ -27,12 +27,23 @@ mongo-down:
     @-{{ mongo_remove_existing }}
 
 clippy:
-    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps
-    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --features meta
-    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --features schema
-    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --all-features
+    cargo clippy --manifest-path khan-macros/Cargo.toml --all-targets --no-deps -- -D warnings
+    cargo clippy --manifest-path khan-macros/Cargo.toml --all-targets --no-deps --all-features -- -D warnings
+    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps -- -D warnings
+    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --features meta -- -D warnings
+    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --features schema -- -D warnings
+    cargo clippy --manifest-path khan/Cargo.toml --all-targets --no-deps --all-features -- -D warnings
+
+fmt:
+    cargo fmt --manifest-path khan/Cargo.toml --check
+    cargo fmt --manifest-path khan-macros/Cargo.toml --check
+
+check-docs:
+    RUSTDOCFLAGS="-D warnings" cargo doc --manifest-path khan/Cargo.toml --no-deps --all-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --manifest-path khan-macros/Cargo.toml --no-deps
 
 test: mongo-up && mongo-down
+    cargo test --manifest-path khan-macros/Cargo.toml --all-features
     KHAN_TEST_MONGODB_URI='{{ mongodb_uri }}' cargo test --manifest-path khan/Cargo.toml --all-features
 
-check: clippy test
+check: clippy fmt check-docs test

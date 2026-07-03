@@ -7,6 +7,15 @@ use mongodb::{
     error::Result,
 };
 
+#[cfg(feature = "schema")]
+const MONGODB_JSON_SCHEMA_KEYWORDS_URL: &str =
+    "https://www.mongodb.com/docs/manual/reference/operator/query/jsonSchema/#available-keywords";
+#[cfg(feature = "schema")]
+const KHAN_ISSUES_URL: &str = "https://github.com/nikis05/khan/issues";
+#[cfg(feature = "schema")]
+const KHAN_TYPES_RECOMMENDATION: &str =
+    "Where applicable, use BSON-compatible types from the `khan::types` module.";
+
 #[doc(hidden)]
 pub use inventory::submit as __private__inventory_submit;
 
@@ -24,6 +33,8 @@ pub struct EntityMetadata {
     query_validation_ptr: fn() -> Option<Document>,
     #[cfg(feature = "schema")]
     json_schema_ptr: Option<fn(&mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema>,
+    #[cfg(feature = "schema")]
+    entity_name_ptr: fn() -> &'static str,
 }
 
 impl EntityMetadata {
@@ -35,6 +46,8 @@ impl EntityMetadata {
             query_validation_ptr: E::query_validation,
             #[cfg(feature = "schema")]
             json_schema_ptr: None,
+            #[cfg(feature = "schema")]
+            entity_name_ptr: std::any::type_name::<E>,
         }
     }
 
@@ -48,6 +61,7 @@ impl EntityMetadata {
             indexes_ptr: E::indexes,
             query_validation_ptr: E::query_validation,
             json_schema_ptr: Some(E::json_schema),
+            entity_name_ptr: std::any::type_name::<E>,
         }
     }
 
@@ -74,28 +88,46 @@ impl EntityMetadata {
     #[cfg(feature = "schema")]
     pub fn json_schema(&self) -> Option<schemars::schema::Schema> {
         #[derive(Debug, Clone)]
-        struct Visitor;
+        struct Visitor {
+            entity_name: &'static str,
+        }
 
         impl schemars::visit::Visitor for Visitor {
             fn visit_schema_object(&mut self, schema: &mut schemars::schema::SchemaObject) {
-                assert!(
-                    if let Some(typ) = &schema.instance_type {
-                        match typ {
-                            schemars::schema::SingleOrVec::Single(typ) => {
-                                **typ != schemars::schema::InstanceType::Integer
-                            }
-                            schemars::schema::SingleOrVec::Vec(types) => types
-                                .iter()
-                                .all(|typ| *typ != schemars::schema::InstanceType::Integer),
+                let has_integer_type = if let Some(typ) = &schema.instance_type {
+                    match typ {
+                        schemars::schema::SingleOrVec::Single(typ) => {
+                            **typ == schemars::schema::InstanceType::Integer
                         }
-                    } else {
-                        true
-                    },
-                    "`integer` type is not supported by MongoDB schema validation. Use `khan::types::Int` instead of std integer types"
+                        schemars::schema::SingleOrVec::Vec(types) => {
+                            types.contains(&schemars::schema::InstanceType::Integer)
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                assert!(
+                    !has_integer_type,
+                    "{}",
+                    unsupported_schema_message(
+                        self.entity_name,
+                        "`integer` type",
+                        Some(KHAN_TYPES_RECOMMENDATION),
+                    )
                 );
                 assert!(
                     schema.reference.is_none(),
-                    "`$ref` keyword is not supported by MongoDB schema validation. Make sure your entities don't contain recursive types"
+                    "{}",
+                    unsupported_schema_message(
+                        self.entity_name,
+                        "`$ref` keyword",
+                        Some(&format!(
+                            "Schemars can generate `$ref` for recursive types even when subschemas are inlined; \
+                             recursive entity schemas are not supported. If this entity is not recursive, report \
+                             this as a bug at {KHAN_ISSUES_URL}."
+                        )),
+                    )
                 );
                 assert!(
                     schema
@@ -103,11 +135,21 @@ impl EntityMetadata {
                         .as_ref()
                         .and_then(|metadata| metadata.default.as_ref())
                         .is_none(),
-                    "`default` keyword is not supported by MongoDB schema validation"
+                    "{}",
+                    unsupported_schema_message(
+                        self.entity_name,
+                        "`default` keyword",
+                        Some(KHAN_TYPES_RECOMMENDATION),
+                    )
                 );
                 assert!(
                     schema.format.is_none(),
-                    "`format` keyword is not supported by MongoDB schema validation"
+                    "{}",
+                    unsupported_schema_message(
+                        self.entity_name,
+                        "`format` keyword",
+                        Some(KHAN_TYPES_RECOMMENDATION),
+                    )
                 );
                 assert!(
                     schema
@@ -115,7 +157,12 @@ impl EntityMetadata {
                         .as_ref()
                         .and_then(|metadata| metadata.id.as_ref())
                         .is_none(),
-                    "`id` keyword is not supported by MongoDB schema validation"
+                    "{}",
+                    unsupported_schema_message(
+                        self.entity_name,
+                        "`id` keyword",
+                        Some(KHAN_TYPES_RECOMMENDATION),
+                    )
                 );
 
                 schemars::visit::visit_schema_object(self, schema);
@@ -129,10 +176,34 @@ impl EntityMetadata {
                 })
                 .into_generator();
             let mut schema = json_schema_ptr(&mut generator);
-            schemars::visit::Visitor::visit_schema(&mut Visitor, &mut schema);
+            schemars::visit::Visitor::visit_schema(
+                &mut Visitor {
+                    entity_name: (self.entity_name_ptr)(),
+                },
+                &mut schema,
+            );
             schema
         })
     }
+}
+
+#[cfg(feature = "schema")]
+fn unsupported_schema_message(
+    entity_name: &str,
+    unsupported: &str,
+    recommendation: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "{unsupported} used in entity `{entity_name}` is not supported by MongoDB schema validation. \
+         See the list of supported keywords at {MONGODB_JSON_SCHEMA_KEYWORDS_URL}."
+    );
+
+    if let Some(recommendation) = recommendation {
+        message.push(' ');
+        message.push_str(recommendation);
+    }
+
+    message
 }
 
 /// Returns an iterator over metadata for all defined entities in the crate.
@@ -167,7 +238,7 @@ pub async fn enforce_indexes(mongo: impl Mongo) -> Result<()> {
     Ok(())
 }
 
-/// Applies query validation and JSON Schema validation rules for all defined entities.
+/// Applies both query validation and JSON Schema validation rules for all defined entities.
 ///
 /// This sets the validation rules for each collection based on:
 /// - `#[entity(query_validation = ...)]`
