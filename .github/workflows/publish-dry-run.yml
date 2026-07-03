@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  publish-dry-run:
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
