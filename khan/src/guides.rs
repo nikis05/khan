@@ -665,7 +665,7 @@ pub mod c3_projections {}
 /// Sometimes you want to make sure that a transaction does not commit based on a stale reference.
 /// For example, imagine you're inserting a `Comment` that references an existing `Post` by its ID.
 /// You check that the referenced post exists at the beginning of the transaction, and want to make
-/// sure the comment does not commit if that post is concurrently deleted or meaningfully modified:
+/// sure the comment does not commit if that post is concurrently deleted or meaningfully modified.
 ///
 /// The following code only checks existence. It does not write to `Post`, so `MongoDB` has no
 /// document-level write conflict to detect for the reference:
@@ -683,7 +683,7 @@ pub mod c3_projections {}
 ///             }
 ///
 ///             // Post may be deleted between these two operations,
-///             // rendering a reference by id invalid.
+///             // rendering a reference by ID invalid.
 ///             Comment {
 ///                 id: ObjectId::new(),
 ///                 post_id,
@@ -699,8 +699,9 @@ pub mod c3_projections {}
 /// ```
 ///
 /// If the transaction already performs a meaningful update to the document (for example,
-/// if adding a comment increments the `commentsCount` field on `Post`), no additional fence write
-/// is needed. The update itself is the fence:
+/// if adding a comment increments the `commentsCount` field on `Post`), no additional steps
+/// are required to guard against conflicts. The update itself establishes document-level
+/// conflict detection.
 ///
 /// ```ignore
 /// session
@@ -724,8 +725,9 @@ pub mod c3_projections {}
 ///                 return Err(Error::custom("Post is not found"));
 ///             }
 ///
-///             // If the post is concurrently modified or deleted by a conflicting writer,
-///             // this transaction will not commit successfully; it will abort or retry.
+///             // If another writer changes the post first, this transaction aborts or retries.
+///             // Once this write succeeds, another writer cannot change the post until
+///             // this transaction completes.
 ///             Comment {
 ///                 id: ObjectId::new(),
 ///                 post_id,
@@ -740,8 +742,8 @@ pub mod c3_projections {}
 ///     .await?;
 /// ```
 ///
-/// However, if no meaningful changes are required, you can perform a small fence write by
-/// incrementing Khan's internal `__fence` field:
+/// However, if no meaningful changes are required, you can perform a small write to
+/// trigger `MongoDB`'s document-level conflict detection:
 ///
 /// ```ignore
 /// session
@@ -753,7 +755,7 @@ pub mod c3_projections {}
 ///
 ///             // We're not making any meaningful changes to the Post, but we still want
 ///             // concurrent modifications/deletes to conflict with this transaction.
-///             Post::update_one(
+///             let result = Post::update_one(
 ///                 &mut mongo,
 ///                 by_id(post_id),
 ///                 UntypedUpdate::new(doc! {
@@ -761,6 +763,10 @@ pub mod c3_projections {}
 ///                 }),
 ///             )
 ///             .await?;
+///
+///             if !result.matched() {
+///                 return Err(Error::custom("Post is not found"));
+///             }
 ///
 ///             Comment {
 ///                 id: ObjectId::new(),
@@ -776,19 +782,15 @@ pub mod c3_projections {}
 ///     .await?;
 /// ```
 ///
-/// A fence gives the following practical guarantee: if you fence a document and then create a
-/// dependent record in the same transaction, that transaction will not commit successfully if
-/// `MongoDB` detects a concurrent conflicting write or delete to the fenced document.
+/// This write establishes an order between the transaction and other writes to the same document.
+/// If another write reaches the document first, the transaction aborts because of a write conflict.
+/// Once the write succeeds, a competing writer cannot change the document until the transaction
+/// completes: it either waits or fails with a write conflict. In either case, the transaction cannot
+/// commit based on document state that another writer changed before the dummy write was made.
 ///
-/// Assumptions and non-guarantees:
-///
-/// - The guarantee relies on `MongoDB` transaction conflict detection.
-/// - The transaction closure may run multiple times because the driver may retry it.
-/// - A fence is document-scoped; it does not protect predicates, ranges, or arbitrary queries.
-/// - Read-only transactions do not establish a fence.
-/// - Writers outside Khan or outside transactions are best-effort from Khan's point of view.
-/// - If collection validation is strict, allow Khan's scalar `__fence` field or use a meaningful update
-///   that already fits your schema.
+/// Khan refers to this technique as "fencing" and provides methods that intentionally write to a
+/// dummy field named `__fence`. For example, [`find_one_and_fence`](crate::Selectable::find_one_and_fence)
+/// finds a document and increments the dummy field.
 ///
 /// This technique works well when the entire transaction happens within a single method or scope.
 ///
@@ -861,10 +863,10 @@ pub mod c3_projections {}
 /// }
 /// ```
 ///
-/// In these cases, it may be desirable encode the fencing requirement in the type system.
+/// In these cases, it may be desirable to encode the fencing requirement in the type system.
 ///
 /// Khan provides a [`Fence<T>`](crate::Fence) wrapper type to express this requirement explicitly in your
-/// method signatures. When a value is wrapped in [`Fence<T>`](crate::Fence), it means that the document has
+/// method signatures. When a value is wrapped in [`Fence<T>`](crate::Fence), it signals that the document has
 /// already been inserted or written in the current transaction.
 ///
 /// You can then require a [`Fence<T>`](crate::Fence) as input to any method that assumes the document has
@@ -912,6 +914,7 @@ pub mod c3_projections {}
 ///     text: String,
 /// ) -> Result<()> {
 ///     // This function requires, at the type level, that the referenced post has been fenced.
+///     let post_id = post_id.into_inner();
 ///
 ///     Comment {
 ///         id: ObjectId::new(),
@@ -976,14 +979,22 @@ pub mod c3_projections {}
 ///
 /// **Important:** a fence is not a mutex or SQL-style row lock. It works by performing a write
 /// to the referenced document inside the transaction so that `MongoDB` can detect conflicting
-/// concurrent writes. It does not stop other operations from running, and it does not provide
-/// predicate or range locking.
+/// concurrent writes. It does not provide predicate or range locking.
+///
+/// - A fence is document-scoped; it does not protect predicates, ranges, or arbitrary queries.
+/// - Fencing relies on `MongoDB`'s document-level transaction locking and conflict detection.
+///   A non-transactional write to the same document can also conflict with or wait for the fenced
+///   transaction.
+/// - `Fence<T>` does not encode the transaction that created it. It is valid only for operations
+///   performed within that same transaction and must not be reused in another transaction.
+/// - The transaction closure may run multiple times because the driver may retry it.
 ///
 /// You should use this technique sparingly. Frequent write conflicts and transaction
 /// retries can lead to degraded performance. Instead, consider:
+///
 /// - designing your schema such that related data is stored in the same document;
 /// - designing your app in a way that can work around inconsistency across documents;
-/// - implementing eventual consistency workflows, e.g. workers that asynchronously update
+/// - implementing eventual consistency workflows, for example, workers that asynchronously update
 ///   all related documents after a document has been updated.
 pub mod c4_transactions_and_fencing {}
 
