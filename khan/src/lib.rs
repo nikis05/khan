@@ -804,6 +804,9 @@ pub trait SelectableWithId<E: Entity>: Selectable<E> {
 pub trait DatabaseExt {
     /// Runs a sequence of operations inside a `MongoDB` transaction.
     ///
+    /// If the transaction fails due to a write conflict or another transient `MongoDB` error, reruns
+    /// the provided closure to retry the transaction.
+    ///
     /// This method accepts a context value that is passed to the callback on every transaction attempt.
     /// This mirrors [`mongodb::action::StartTransaction::and_run`] and is useful when the callback needs to
     /// borrow data across retries.
@@ -1263,9 +1266,10 @@ impl<T> Field<T> {
 ///
 /// See [transactions and fencing](crate::guides::c4_transactions_and_fencing).
 ///
-/// A fence is not a mutex or SQL-style row lock. It means the transaction has written the referenced document
-/// or inserted it, so a conflicting concurrent write/delete detected by `MongoDB` will prevent this
-/// transaction from committing successfully.
+/// A fence is not a mutex or SQL-style row lock. It means the transaction has written or inserted the
+/// referenced document, establishing an order between the transaction and competing writes to that document.
+/// Depending on which write reaches the document first, the transaction may abort or retry, or a competing
+/// writer may wait or fail with a write conflict.
 ///
 /// It can be passed to any method that requires a fenced input.
 ///
