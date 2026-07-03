@@ -1,8 +1,10 @@
 name: Publish (dry-run)
 
 on:
-  release:
-    types: [created]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,8 +22,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Publish khan-macros
+      - name: Publish khan-macros (dry-run)
         run: cargo publish -p khan-macros --dry-run
 
-      - name: Publish khan
+      - name: Publish khan (dry-run)
         run: cargo publish -p khan --dry-run
