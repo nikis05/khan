@@ -25,6 +25,6 @@ jobs:
       - name: Publish (dry run)
         run: |
           cargo publish --dry-run \
-          -p my-package-macros \
-          -p my-package \
+          -p khan-macros \
+          -p khan \
           --locked

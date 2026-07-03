@@ -28,6 +28,6 @@ jobs:
       - name: Publish
         run: |
           cargo publish \
-          -p my-package-macros \
-          -p my-package \
+          -p khan-macros \
+          -p khan \
           --locked
